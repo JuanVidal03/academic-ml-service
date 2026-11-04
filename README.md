@@ -123,10 +123,10 @@ Writes `models/model.joblib` and `models/metrics.json`.
 
 ```bash
 # Development (auto-reload)
-uv run uvicorn dropout_ml.api.app:app --reload --port 8000
+uv run uvicorn dropout_service.main:app --reload --port 8000
 
 # Production
-uv run uvicorn dropout_ml.api.app:app --host 0.0.0.0 --port 8000
+uv run uvicorn dropout_service.main:app --host 0.0.0.0 --port 8000
 ```
 
 Interactive API docs: <http://localhost:8000/docs>
@@ -153,19 +153,23 @@ copied from Railway or Heroku works unchanged.
 
 ## API
 
+Business endpoints live under `/api/v1`. `/health` is deliberately unversioned: it is an
+operational contract that Railway's healthcheck points at, so it must never move.
+
 | Method | Endpoint | Description |
 |---|---|---|
 | GET | `/health` | Liveness and readiness (used by Railway) |
-| GET | `/model/info` | Model metadata, threshold and test metrics |
-| POST | `/predict` | Assess one student |
-| POST | `/predict/batch` | Assess up to 100 students |
-| GET | `/predictions` | Paginated audit log (requires a database) |
+| GET | `/` | Service banner |
+| GET | `/api/v1/model/info` | Model metadata, threshold and test metrics |
+| POST | `/api/v1/predict` | Assess one student |
+| POST | `/api/v1/predict/batch` | Assess up to 100 students |
+| GET | `/api/v1/predictions` | Paginated audit log (requires a database) |
 | GET | `/docs` | Interactive OpenAPI documentation |
 
 ### Example
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:8000/api/v1/predict \
   -H "Content-Type: application/json" \
   -d '{
     "semestre": 3,
@@ -224,7 +228,7 @@ with `RISK_THRESHOLD_MEDIUM` and `RISK_THRESHOLD_HIGH`.
 
 ### Input contract
 
-All 34 features are declared once, in `src/dropout_ml/schema.py`. Notes:
+All 34 features are declared once, in `src/dropout_service/ml/schema.py`. Notes:
 
 - `area_materia_critica` is **optional** — omit it or send `null` for the ~50% of students
   with no critical area. The pipeline supplies the fill value used during training.
@@ -257,25 +261,36 @@ Never set `CORS_ORIGINS` to `*`: the API is called with credentials.
 ## Development
 
 ```bash
-uv run pytest -v            # 66 tests
+uv run pytest -v            # 78 tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
 
-### Two design rules worth knowing before you change anything
+### Three design rules worth knowing before you change anything
 
 **1. Add a feature in exactly one place.** Every feature is a field on `StudentFeatures` in
-`schema.py`; the categorical and numeric lists are *derived* from it by introspection. The
+`ml/schema.py`; the categorical and numeric lists are *derived* from it by introspection. The
 previous version hand-wrote that list in five separate files, and two copies drifted apart —
 training filled missing categories with `"Unknown"` while the API defaulted to `"N/A"`,
-which silently corrupted predictions for half the student population. `tests/test_schema.py`
-fails if a field ever escapes the derivation.
+which silently corrupted predictions for half the student population.
+`tests/ml/test_schema.py` fails if a field ever escapes the derivation.
 
 **2. Anything that learns from data belongs inside the pipeline.** Imputation, scaling and
-encoding all live in `pipeline.py`, so scikit-learn refits them per cross-validation fold
-and training and serving share one code path. Imputing in `data.py` would leak test-set
-statistics into every fold and let the two paths diverge. `tests/test_pipeline.py` and
-`tests/test_no_train_serve_skew.py` guard both properties.
+encoding all live in `ml/pipeline.py`, so scikit-learn refits them per cross-validation fold
+and training and serving share one code path. Imputing in `ml/training/data.py` would leak
+test-set statistics into every fold and let the two paths diverge.
+`tests/ml/test_pipeline.py` and `tests/ml/test_no_train_serve_skew.py` guard both properties.
+
+**3. The dependency arrows are tested, not just intended.** The serving path must never
+import `ml/training/` — those modules read the CSV, which is excluded from the Docker image,
+so an accidental import would pass every local test and fail only in production. And `ml/`
+must never import FastAPI or the HTTP slices, so the model stays usable from a notebook or
+a batch job. `tests/test_layering.py` enforces both.
+
+A consequence worth knowing: `model.joblib` pickles a function from `ml/pipeline.py` by
+import path, so **moving Python modules invalidates every previously trained model** with
+`ModuleNotFoundError`. Retrain after any such refactor — it is deterministic and takes
+seconds.
 
 ---
 
