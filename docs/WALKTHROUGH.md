@@ -15,7 +15,7 @@ Written against the code as it stands; every command here was run and its output
 5. [Run the API](#5-run-the-api)
 6. [Anatomy of a prediction request](#6-anatomy-of-a-prediction-request)
 7. [Test it](#7-test-it)
-8. [Set up the database](#8-set-up-the-database-optional)
+8. [The database](#8-the-database)
 9. [Deploy](#9-deploy)
 10. [Authentication (planned)](#10-authentication-planned)
 11. [Troubleshooting](#11-troubleshooting)
@@ -28,13 +28,22 @@ Written against the code as it stands; every command here was run and its output
 There are two separate flows. They share the preprocessing pipeline and nothing else.
 
 ```
+OFFLINE (seeding, once) ─ data/*.csv ─> training_data/service.py:seed_from_csv
+                                        └─> ml.training_records + ml.students
+
 OFFLINE (training) ─ run by a developer, seconds
-  data/*.csv
-    └─> ml/training/data.py:load_dataset ─> split_dataset
-          └─> ml/schema.py:build_pipeline
-                └─> ml/training/train.py:compare_models ─> tune_model
-                      ─> select_threshold ─> evaluate
-                      └─> train.py:save_model ─> models/model.joblib + metrics.json
+  ml.training_records
+    └─> training_data/service.py:load_training_frame   (JSONB -> DataFrame)
+          └─> ml/training/data.py:prepare_dataset ─> split_dataset
+                └─> ml/schema.py:build_pipeline
+                      └─> ml/training/train.py:compare_models ─> tune_model
+                            ─> select_threshold ─> evaluate
+                            └─> model_registry/service.py:save_version
+                                  └─> ml.model_versions (BYTEA + JSONB, is_active)
+
+STARTUP ─ once
+  main.py:lifespan ─> model_registry/service.py:load_active
+                       └─> ml.model_versions ─> ml/predict.py:Predictor.from_bytes
 
 ONLINE (serving) ─ runs per HTTP request, milliseconds
   HTTP POST /predict
@@ -44,7 +53,8 @@ ONLINE (serving) ─ runs per HTTP request, milliseconds
           └─> ml/predict.py:Predictor.predict   (reuses the SAME pipeline, now fitted)
                 └─> PredictionResult ─> JSON response
           └─> predictions/service.py:log_predictions   (background, after the response)
-                └─> predictions/models.py:Prediction ─> PostgreSQL
+                └─> ml.predictions, linked to the model version and (optionally)
+                    the student
 ```
 
 The model is loaded **once** at startup, not per request. The arrow worth remembering is
@@ -64,14 +74,25 @@ src/dropout_service/
   database.py        engine, session factory, Base    (no table definitions)
   dependencies.py    shared Depends providers + Annotated aliases
 
-  ml/                the model — a domain library, no HTTP, no FastAPI
+  ml/                the model — a domain library: no HTTP, no FastAPI, no SQLAlchemy
     schema.py        THE single source of truth: the 34 features AND the
                      preprocessing pipeline that transforms them
-    predict.py       Predictor, PredictionResult      (serving)
+    predict.py       Predictor (from_bytes/dump), PredictionResult   (serving)
     training/        offline only — never imported by the API
-      data.py        load_dataset, split_dataset
-      train.py       compare, tune, calibrate, save
+      data.py        prepare_dataset, split_dataset
+      train.py       compare, tune, calibrate  (persists nothing)
       analysis.py    exploratory reports
+
+  model_registry/    the trained artefact, stored in the database
+    models.py        ml.model_versions (artifact BYTEA, metrics JSONB)
+    service.py       save_version(), load_active()
+
+  training_data/     the dataset and the analysis reports
+    models.py        ml.training_records (features JSONB), ml.analysis_reports
+    service.py       seed_from_csv(), load_training_frame(), save_analysis()
+
+  students/          ml.students — identity, so a prediction ties to a person
+  users/             ml.users — storage for the authentication work (§10)
 
   predictions/       feature slice
     router.py        /predict, /predict/batch, /predictions
@@ -82,7 +103,7 @@ src/dropout_service/
   system/            ops + deployed-model metadata
     router.py        /health, /, /model/info
 
-  auth/              not created yet — the slot §10 fills
+  auth/              not created yet — the slot §10 fills (the table already exists)
 ```
 
 Everything sits under one root package on purpose, rather than as flat `src/ml/`,
@@ -98,6 +119,7 @@ system/ ─┐
 predictions/ ─┘
          ml/ ───> predictions/        NO. The domain must not know its HTTP consumer.
          ml/ ───> fastapi             NO. The model stays usable from a notebook.
+         ml/ ───> sqlalchemy          NO. from_bytes takes bytes; the registry reads.
 ```
 
 `ml/` is deliberately **not** a feature slice: it has no HTTP surface and is consumed *by*
@@ -137,6 +159,18 @@ cp .env.example .env
 2. `uv.lock` — exact pinned versions, so every machine gets the same build
 3. `.env.example` → `.env` — your local configuration
 
+A database is required too. The full bring-up, in order — each step idempotent:
+
+```bash
+createdb dropout_db             # or point DATABASE_URL at an existing one
+uv run alembic upgrade head     # create the ml schema
+uv run scripts/seed_db.py       # data/*.csv -> training_records + students
+uv run scripts/train.py         # train -> model_versions (marked active)
+```
+
+Until `scripts/train.py` has run there is no active model version, so the service starts
+`degraded` and `/predict` returns 503. That is reported, not fatal.
+
 `cp .env.example .env` is **required**, not optional. The seven tuneable settings have no
 default in the code, so a missing one aborts startup with a `ValidationError` naming the
 field. `.env.example` ships the intended values, so copying it is enough. Only
@@ -168,15 +202,17 @@ uv run scripts/analyze.py
 | 1 | `scripts/analyze.py:main` | Entry point |
 | 2 | `config.py:configure_logging` | Set up log format and level |
 | 3 | `config.py:get_settings` | Resolve `data_dir`, `reports_dir` |
-| 4 | `ml/training/analysis.py:run_analysis` | Orchestrates everything below |
-| 5 | `ml/training/data.py:load_dataset` | Read CSV, map `deserto` → 0/1, return `(X, y)` |
+| 4 | `training_data/service.py:load_training_frame` | `SELECT features, deserto`; JSONB → DataFrame |
+| 5 | `ml/training/analysis.py:run_analysis` | Orchestrates everything below |
+| 6 | `ml/training/data.py:prepare_dataset` | Validate the frame, return `(X, y)` |
 | 6 | `analysis.py:describe_dataset` | Row counts, dropout rate, feature counts |
 | 7 | `analysis.py:summarise_features` | Per-feature mean/std/min/max, or value counts |
 | 8 | `analysis.py:dropout_rate_by_category` | Dropout rate within each category level |
 | 9 | `analysis.py:numeric_correlations` | Pearson correlation with the target |
 | 10 | `analysis.py:mutual_information` | MI per feature (categoricals flagged discrete) |
 | 11 | `analysis.py:feature_importance` | Permutation importance via `ml/schema.py` |
-| 12 | `analysis.py:save_analysis` → `render_markdown` | Write `reports/analysis.{md,json}` |
+| 12 | `analysis.py:render_markdown` | Write `reports/analysis.md` for humans |
+| 13 | `training_data/service.py:save_analysis` | Store the structured result in `ml.analysis_reports` |
 
 **Expect** a few seconds, and:
 
@@ -222,15 +258,15 @@ uv run scripts/train.py
 |---|---|---|
 | 1 | `scripts/train.py:main` | Entry point |
 | 2 | `config.py:configure_logging` | Logging |
-| 3 | `ml/training/train.py:run_training` | Orchestrates everything below |
-| 4 | `config.py:get_settings` | `test_size`, `cv_folds`, `random_state`, `target_recall` |
-| 5 | `ml/training/data.py:load_dataset` | Read CSV → `(X, y)`; raises on a corrupt target |
+| 3 | `training_data/service.py:load_training_frame` | Read `ml.training_records`; JSONB → DataFrame |
+| 4 | `ml/training/train.py:run_training` | Orchestrates everything below |
+| 5 | `ml/training/data.py:prepare_dataset` | Validate the frame; raises on a corrupt target |
 | 6 | `ml/training/data.py:split_dataset` | Stratified 80/20 → 2,400 train / 600 test |
 | 7 | `train.py:compare_models` | For each of 5 algorithms: `_seeded` → `ml/schema.py:build_pipeline` → `cross_validate` with 4 scorers |
 | 8 | `train.py:tune_model` | `GridSearchCV` over `PARAM_GRIDS[winner]`, refits the best |
 | 9 | `train.py:select_threshold` | `cross_val_predict` out-of-fold → `precision_recall_curve` → highest threshold meeting `TARGET_RECALL` |
 | 10 | `train.py:evaluate` | Test-set metrics **at that threshold** |
-| 11 | `train.py:save_model` | `joblib.dump` the pipeline + write `metrics.json` |
+| 11 | `model_registry/service.py:save_version` | `joblib` → `BYTEA`, metadata → `JSONB`, previous version deactivated in the same transaction |
 
 Inside step 7, `ml/schema.py:build_pipeline` → `build_preprocessor` assembles:
 
@@ -252,14 +288,11 @@ Inside step 7, `ml/schema.py:build_pipeline` → `build_preprocessor` assembles:
 **Verify**
 
 ```bash
-ls -la models/
-uv run python -c "
-import json; m = json.load(open('models/metrics.json'))
-print('model     :', m['model_name'])
-print('features  :', m['n_features'])
-print('threshold :', round(m['decision_threshold'], 4))
-print('roc_auc   :', round(m['test_metrics']['roc_auc'], 4))
-"
+psql "$DATABASE_URL" -tAc "
+  select algorithm, n_features, round(decision_threshold::numeric, 4),
+         round((metrics->'test_metrics'->>'roc_auc')::numeric, 4), length(artifact)
+  from ml.model_versions where is_active;"
+# LogisticRegression|34|0.3505|0.7695|10874
 ```
 
 **Sanity check, not celebration.** ROC-AUC should land near **0.77**. A sudden jump to 0.95+
@@ -277,7 +310,7 @@ until step 10.
 `Predictor` calls `predict_proba` and compares against the stored threshold instead. Raising
 recall from 0.58 to 0.79 is the entire point of calibrating it.
 
-**The artefact is coupled to the package path.** `model.joblib` is a pickle, and it stores
+**The artefact is coupled to the package path.** The stored artefact is a pickle, and it holds
 `ml/schema.py:coerce_missing_to_nan` by its *import path*. Renaming or moving the package
 therefore makes every previously trained model unloadable with
 `ModuleNotFoundError`. Retraining is the fix (it is deterministic and takes seconds), but
@@ -302,28 +335,29 @@ uv run uvicorn dropout_service.main:app --reload --port 8000
 | 2 | `config.py:get_settings` | Read environment |
 | 3 | `main.py:lifespan` | Startup hook (runs once) |
 | 4 | `config.py:configure_logging` | Logging |
-| 5 | `ml/predict.py:Predictor.from_disk` | Load `model.joblib` + `metrics.json` into memory |
-| 6 | `database.py:create_db_engine` / `create_session_factory` | Only if `DATABASE_URL` is set |
+| 5 | `database.py:create_db_engine` / `create_session_factory` | Connect |
+| 6 | `model_registry/service.py:load_active` → `Predictor.from_bytes` | Load the active model version into memory |
 | 7 | `CORSMiddleware` | Restrict browser origins to `CORS_ORIGINS` |
 | 8 | `main.py` exception handler | Map `SQLAlchemyError` → 503 |
 | 9 | `system/router.py:router` | Mount `/health`, `/` and `/model/info` |
 | 10 | `predictions/router.py:router` | Mount the prediction endpoints |
 
-Resources land on `app.state` and reach routes through `dependencies.py`. If the model file
-is missing, startup logs an error and continues — `/health` then reports `degraded` and
-prediction endpoints return `503`.
+Resources land on `app.state` and reach routes through `dependencies.py`. If the database is
+unreachable or there is no active model version, startup logs it and continues — `/health`
+reports `degraded` and prediction endpoints return `503`. That tolerance is deliberate:
+crash-looping through a brief outage would hide the reason.
 
 **Verify**
 
 ```bash
 curl -s localhost:8000/health
-# {"status":"healthy","model_loaded":true,"database":null}
+# {"status":"healthy","model_loaded":true,"database":{"connected":true}}
 
 curl -s localhost:8000/
 # {"service":"dropout-prediction-api","docs":"/docs","health":"/health"}
 ```
 
-`"database": null` simply means no `DATABASE_URL` is configured. Then open
+`model_loaded: true` means an active `model_versions` row was found. Then open
 <http://localhost:8000/docs>.
 
 ---
@@ -466,10 +500,12 @@ uv run pytest -v
 1. `pyproject.toml` `[tool.pytest.ini_options]` — `pythonpath = ["src"]`, `FutureWarning`
    from our own package treated as an error
 2. `tests/conftest.py` — fixtures, which run first:
-   - `dataset` → `ml/training/data.py:load_dataset`
-   - `models_dir` → trains a small `LogisticRegression` on 600 rows into a temp directory
-   - `test_settings` → `Settings` with no database, isolated from your `.env`
-   - `predictor` → `ml/predict.py:Predictor.from_disk`
+   - `raw_frame` / `dataset` → the CSV read directly, standing in for a database read
+   - `model_artifact` → trains a small `LogisticRegression` and returns joblib **bytes**,
+     which is what a `model_versions` row holds
+   - `test_settings` → `Settings` pointing at an unreachable database
+   - `predictor` → `ml/predict.py:Predictor.from_bytes`
+   - `fake_session` → records what it was asked to persist; never opens a connection
    - `client` → `main.py:create_app` in a `TestClient` (runs the real lifespan)
    - `student` → a valid request body
 3. The test modules, mirroring the package layout:
@@ -485,14 +521,23 @@ uv run pytest -v
 | `tests/predictions/test_router.py` | Status codes, response shape, batch order, validation, prefix enforcement |
 | `tests/predictions/test_service.py` | `log_predictions` without HTTP, including failure handling |
 | `tests/system/test_router.py` | `/health` stays unprefixed, `/model/info`, OpenAPI |
+| `tests/model_registry/test_service.py` | **The BYTEA round-trip rebuilds a working predictor**; one active version |
+| `tests/training_data/test_service.py` | JSONB payload building: NaN → null, numpy → native |
 | `tests/test_layering.py` | **The dependency arrows in §1 actually hold** |
 | `tests/test_error_handling.py` | An unreachable database → 503, not 500 |
 | `tests/test_config.py` | `DATABASE_URL` normalisation; derived paths; version metadata; **the seven settings have no code-side default** |
 
-Each test directory needs an `__init__.py`: `tests/__init__.py` exists, and two modules
-share the basename `test_router.py`, which pytest would otherwise reject as a duplicate.
+Each test directory needs an `__init__.py`: `tests/__init__.py` exists, and several modules
+share a basename (`test_router.py`, `test_service.py`), which pytest would otherwise reject
+as duplicates.
 
-**Expect** `79 passed` in about seven seconds.
+**No test touches PostgreSQL.** The session layer is faked and the model is built from
+joblib bytes in memory, so `uv run pytest` passes with the database down or `DATABASE_URL`
+unset — worth verifying occasionally, since it is easy to lose by accident. The cost is
+that the schema, the migrations and the JSONB/BYTEA round-trip are **not** covered by the
+suite; §8 covers them against the real database instead.
+
+**Expect** `93 passed` in about six seconds.
 
 The suite trains a real model, so assertions are about real behaviour. The previous suite
 asserted `status_code in [200, 503]`, which passed whether the service worked or not; those
@@ -515,7 +560,7 @@ uv run pytest tests/ml/test_no_train_serve_skew.py -q
 # FAILED test_an_unseen_category_would_have_produced_a_different_answer
 
 cp /tmp/pipeline.bak src/dropout_service/ml/schema.py
-uv run pytest -q          # 79 passed again
+uv run pytest -q          # 93 passed again
 ```
 
 The layering tests can be checked the same way — add
@@ -529,9 +574,10 @@ the `normalise` step — is a real regression. That is the distinction the test 
 
 ---
 
-## 8. Set up the database (optional)
+## 8. The database
 
-Needed only to log predictions and use `GET /predictions`. Training never touches it.
+Required. It holds the training data, the trained model and the audit log, so every step
+after `uv sync` depends on it.
 
 **Commands**
 
@@ -550,6 +596,7 @@ uv run alembic upgrade head
 | 4 | `alembic/env.py` | Imports `database.py:Base` **and every slice's `models`** |
 | 5 | `alembic/env.py` | `CREATE SCHEMA IF NOT EXISTS ml` |
 | 6 | `alembic/versions/0001_...py:upgrade` | Create `ml.predictions` + the `created_at` index |
+| 7 | `alembic/versions/0002_full_schema.py:upgrade` | Create `users`, `students`, `training_records`, `model_versions`, `analysis_reports`; add the FKs to `predictions` |
 
 Step 5 exists because Alembic stores its own `alembic_version` table inside the `ml` schema
 and creates it *before* running any migration — so the schema must already exist or the first
@@ -560,7 +607,11 @@ their own slice (`predictions/models.py`), not in `database.py`, so they are onl
 on `Base.metadata` once that module has been imported. `env.py` imports it explicitly:
 
 ```python
+from dropout_service.model_registry import models as _model_registry_models  # noqa: E402,F401
 from dropout_service.predictions import models as _predictions_models  # noqa: E402,F401
+from dropout_service.students import models as _students_models  # noqa: E402,F401
+from dropout_service.training_data import models as _training_data_models  # noqa: E402,F401
+from dropout_service.users import models as _users_models  # noqa: E402,F401
 ```
 
 Delete that line and `alembic revision --autogenerate` sees the table in the database but
@@ -580,13 +631,19 @@ migration.
 **Verify**
 
 ```bash
-psql "$DATABASE_URL" -c "\d ml.predictions"
+psql "$DATABASE_URL" -c "\dt ml.*"              # six tables
+psql "$DATABASE_URL" -c "\d ml.model_versions"
 
-# Make a prediction, then confirm it was logged
+# The artefact really is bytes, and exactly one version is active
+psql "$DATABASE_URL" -tAc "select length(artifact), algorithm, is_active
+                           from ml.model_versions;"
+psql "$DATABASE_URL" -tAc "select count(*) from ml.model_versions where is_active;"  # 1
+
+# Make a prediction, then confirm it was logged and linked
 curl -s -o /dev/null -X POST localhost:8000/predict \
   -H 'Content-Type: application/json' -d @/tmp/student.json
 sleep 1
-psql "$DATABASE_URL" -c "select id, risk_level, round(probability::numeric,4), created_at
+psql "$DATABASE_URL" -c "select id, student_id, model_version_id, risk_level
                          from ml.predictions order by id desc limit 5;"
 curl -s 'localhost:8000/predictions?page=1&page_size=5' | python3 -m json.tool
 ```
@@ -602,11 +659,15 @@ sed -n '/^def upgrade/,/^def downgrade/p' alembic/versions/*should_be_empty*
 rm alembic/versions/*should_be_empty*
 ```
 
-The database must remain **optional**. Confirm the service still works without it:
+Two constraints are worth checking by hand, because the test suite cannot:
 
 ```bash
-unset DATABASE_URL
-uv run uvicorn dropout_service.main:app --port 8000   # /predict still returns 200
+# Exactly one active model, enforced by a partial unique index rather than by hope.
+psql "$DATABASE_URL" -c "update ml.model_versions set is_active = true;"
+# ERROR: duplicate key value violates unique constraint "uq_model_versions_single_active"
+
+# The migration reverses cleanly.
+uv run alembic downgrade base && uv run alembic upgrade head
 ```
 
 A bare `postgresql://` URL is rewritten to `postgresql+psycopg://` by
@@ -631,14 +692,16 @@ docker run -p 8000:8000 --env-file .env dropout-service:1.0.0
    explicitly kept: `pyproject.toml` declares it as the project readme, so the wheel will
    not build without it
 2. `Dockerfile` build stage — `uv sync --frozen --no-dev` against `uv.lock`
-3. `Dockerfile` runtime stage — copies `.venv`, `src`, `models`, `alembic`; creates `appuser`
+3. `Dockerfile` runtime stage — copies `.venv`, `src`, `alembic`; creates `appuser`. No
+   model and no training data: the model is read from the database at startup
 4. `CMD` — `uvicorn dropout_service.main:app --port ${PORT:-8000}`
 5. `HEALTHCHECK` in the Dockerfile — the only health probe; there is no
    platform-specific config file
 
-The image ships `models/` but not `data/`: training is offline, so the container carries only
-what it serves. Commit `models/model.joblib` or build it in CI — and remember from §4 that
-the artefact must be retrained whenever Python modules move.
+The image ships neither `models/` nor `data/`: the active model version comes from the
+database at startup, so one image works against any environment and nothing needs
+rebuilding to ship a retrained model. Remember from §4 that the artefact itself must be
+retrained whenever Python modules move.
 
 **Verify**
 
@@ -646,7 +709,7 @@ the artefact must be retrained whenever Python modules move.
 docker run -d -p 8000:8000 --env-file .env --name dropout-test dropout-service:1.0.0
 sleep 5
 curl -s localhost:8000/health
-docker exec dropout-test ls /app/data 2>&1   # must NOT exist
+docker exec dropout-test ls /app/data /app/models 2>&1   # neither must exist
 docker stop dropout-test && docker rm dropout-test
 
 # And confirm the config really is required: no --env-file means no start.
@@ -686,14 +749,15 @@ shared files.
 src/dropout_service/auth/
   router.py      POST /auth/login, GET /auth/me
   schemas.py     LoginRequest, TokenResponse, UserRead
-  models.py      the users table  (+ a line in alembic/env.py — see §8)
-  service.py     authenticate(), create_user()
-  security.py    password hashing, JWT encode/decode
+  service.py     authenticate(), get_current_user()
+  security.py    JWT encode/decode  (bcrypt hashing already in scripts/create_user.py)
+
+# the table itself already exists: users/models.py + migration 0002
 ```
 
 | Piece | Approach |
 |---|---|
-| Storage | `users` table (email, bcrypt hash, role) in `auth/models.py` + a new migration |
+| Storage | **Already done**: `ml.users` exists (`users/models.py`), and `scripts/create_user.py` creates accounts with bcrypt |
 | Login | `POST /auth/login` → short-lived JWT; `GET /auth/me` |
 | Hashing | `bcrypt` (via `passlib`), never a bare SHA |
 | Verification | `get_current_user` in `auth/service.py`, exposed as `CurrentUserDep` in `dependencies.py` |
@@ -704,7 +768,7 @@ Three wiring points, each already marked with a comment in the code:
 
 1. `main.py` — `app.include_router(auth_router)`
 2. `dependencies.py` — add `CurrentUserDep`, mirroring the existing `Annotated` aliases
-3. `alembic/env.py` — import `auth.models` so the users table reaches `Base.metadata`
+3. `alembic/env.py` — nothing to add; `users/models.py` is already imported there
 
 Put the blanket requirement on the `include_router` call for the protected routers, not on
 `system_router` — that one carries `/health`, which the container's `HEALTHCHECK` needs to
@@ -723,16 +787,19 @@ known frontend origins.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `/health` → `"status":"degraded"` | No model file | `uv run scripts/train.py` |
+| `/health` → `"status":"degraded"` | No active model version, or the database is down | `uv run scripts/train.py`; check `/health`'s `database` field |
 | `/predict` → 503 | Same | As above; check startup logs |
-| `FileNotFoundError: No model at ...` | Never trained | `uv run scripts/train.py` |
-| `/predictions` → 503 | No `DATABASE_URL` | Set it, run `alembic upgrade head` |
+| `autogenerate` emits `drop_table` | A slice's `models` import is missing from `alembic/env.py` | Add it; see §8 |
+| `/predictions` → 503 | Database unreachable | Check the logs and `/health`; the connection string is in `.env` |
+| `/health` → `degraded`, `model_loaded: false` | No active `model_versions` row | `uv run scripts/train.py` |
+| `RuntimeError: No training records` | Database not seeded | `uv run scripts/seed_db.py` |
+| `relation "ml.training_records" does not exist` | Migrations not applied | `uv run alembic upgrade head` |
 | `ModuleNotFoundError: psycopg2` | Pre-normalisation URL | Use `postgresql://...`; it is rewritten automatically |
 | `InvalidSchemaName: schema "ml" does not exist` | Table created outside Alembic | `uv run alembic upgrade head` |
 | 422 on a seemingly valid body | Closed vocabulary, or an unknown field | Read `detail`; check `/docs` |
 | 422 on `area_materia_critica` | Sending `"N/A"` or `"Unknown"` | Omit the field or send `null` |
 | `ModuleNotFoundError: dropout_service` | Package not installed | `uv sync` (installs the project itself) |
-| `ModuleNotFoundError` naming a module **when loading the model** | `model.joblib` was trained before a module moved; the pickle stores import paths | `uv run scripts/train.py` to rebuild the artefact |
+| `ModuleNotFoundError` naming a module **when loading the model** | The stored artefact predates a module move; the pickle holds import paths | `uv run scripts/train.py` to rebuild it |
 | `ValidationError` naming settings at startup | No `.env`, or a key missing from it | `cp .env.example .env`; in Docker pass `--env-file .env` |
 | 500 from a database endpoint | Should not happen — `SQLAlchemyError` is mapped to 503 | Check the logs; if it is genuinely a 500, the handler in `main.py` was bypassed |
 | CORS error in the browser | Origin not allowed | Add it to `CORS_ORIGINS` |
@@ -745,7 +812,7 @@ reachable, which explains most of the above.
 
 ## 12. Design decisions, and why
 
-Five rules shape this codebase. Each exists because of a specific bug or a specific
+Six rules shape this codebase. Each exists because of a specific bug or a specific
 failure it would otherwise allow.
 
 ### Every feature is declared exactly once
@@ -798,8 +865,8 @@ pipeline rather than patching it at the serving edge.
 point: missing a student who drops out costs a degree, while a false alarm costs one advising
 conversation. `ml/training/train.py:select_threshold` picks the threshold meeting
 `TARGET_RECALL` (0.80),
-stores it in `metrics.json`, and `Predictor` compares `predict_proba` against it. Recall goes
-from 0.58 to 0.79.
+stores it alongside the artefact in `ml.model_versions`, and `Predictor` compares
+`predict_proba` against it. Recall goes from 0.58 to 0.79.
 
 It is selected from **out-of-fold predictions on the training set**, not the test set.
 Choosing it on the test set would tune the operating point to the rows used to report
@@ -825,7 +892,7 @@ The dependency arrows are not a convention, they are tested
   notebook, a batch job, or a future scheduled retraining task — none of which should need
   a web framework installed.
 
-A related consequence worth knowing: `model.joblib` pickles
+A related consequence worth knowing: the stored artefact pickles
 `ml/schema.py:coerce_missing_to_nan` by import path, so moving Python modules invalidates
 every previously trained artefact. That is why this restructure retrained the model, and
 why a production release that moves modules must ship a fresh one.
@@ -861,6 +928,31 @@ The cost is real and worth stating plainly: every import carries the 16 characte
 different angle, rules out a sibling `src/api/` package — see the end of *KISS first*
 below.
 
+### State lives in the database; `ml/` holds none of it
+
+The trained artefact is a `BYTEA` column and its metrics a `JSONB` one. The split is not
+arbitrary: a fitted scikit-learn pipeline is **not** JSON-serialisable — `json.dumps`
+raises, because it carries numpy arrays, learned one-hot categories, scaler statistics and
+a reference to `coerce_missing_to_nan`. A JSON-only store would need a bespoke serialiser
+that works only for `LogisticRegression`, and `train.py` picks the winner among five
+algorithms, so it would break silently the day RandomForest or the calibrated SVM won.
+The metrics genuinely *are* JSON, so they get a queryable column.
+
+Training features are stored as **one `JSONB` payload, not 34 columns**, for exactly the
+reason the first rule exists: a mirrored column list would be a second copy of the feature
+set, free to drift from `StudentFeatures` — and it would need a migration for every new
+feature. Individual values stay queryable via `features->>'nota_promedio'`.
+
+`ml/` stays free of SQLAlchemy as well as FastAPI. `Predictor.from_bytes` takes bytes and a
+dict; `model_registry/service.py` is what reads the row. That is what keeps the model usable
+from a notebook, a batch job or a future scheduled retrain, none of which should need a web
+framework or a database session to import. `tests/test_layering.py` enforces it.
+
+Two guarantees are pushed down into the schema rather than left to application code: a
+partial unique index on `is_active` makes "exactly one active model" impossible to violate,
+and foreign keys from `predictions` to `model_versions` and `students` mean an audit row
+stays interpretable after a retrain.
+
 ### KISS first; SOLID where it pays
 
 Applied: one source of truth; dependency injection via `Depends` instead of a global `_state`
@@ -880,8 +972,7 @@ imply that HTTP is a peer of the domain rather than a way of delivering it. That
 same trade-off as *Why a root package rather than `src/ml/` directly* above, reached from
 the other direction.
 
-Also removed rather than refactored: the `ml.training_records` table, its 209-line seed
-script, the DB loader and `POST /records` — roughly 450 lines supporting "retrain from
-verified records accumulated in the database", a capability nothing used. The CSV is the
-training source. If accumulating verified outcomes becomes a real requirement, the single
-feature declaration in `schema.py` makes adding it straightforward.
+`training_records` has a `source` column so verified outcomes could be accumulated
+alongside the seeded CSV rows later, but nothing writes them yet — the column exists
+because adding it afterwards would mean a migration over real data, not because the feature
+is half-built.

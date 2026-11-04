@@ -13,13 +13,16 @@ This service is the backend for ths repo [Academic web service.](https://github.
 
 ## How it works, briefly
 
-1. A historical dataset of 3,000 students is the training source (`data/`).
+1. A historical dataset of 3,000 students is seeded from `data/` into PostgreSQL.
 2. `scripts/train.py` compares five algorithms with cross-validation, tunes the winner,
-   calibrates a decision threshold for recall, and saves `models/model.joblib`.
-3. The API loads that model once at startup and serves predictions.
-4. Every prediction is written to a PostgreSQL audit log — if a database is configured.
+   calibrates a decision threshold for recall, and stores the model in the database.
+3. The API loads the active model version once at startup and serves predictions.
+4. Every prediction is written to an audit log, linked to the model that produced it.
 
 Training happens **offline**. The API never trains; it only loads and serves.
+
+**PostgreSQL is required.** The model, the training data and the audit log all live in it,
+so there is nothing to fall back to.
 
 ## Dataset
 
@@ -109,15 +112,21 @@ Run `uv run scripts/analyze.py` to regenerate the full report.
 cd ml-service
 uv sync
 cp .env.example .env     # required: the service will not start without it
+createdb dropout_db      # or point DATABASE_URL at an existing database
 ```
 
-### Train
+### Bring up the database
+
+Three steps, in order. Each is idempotent.
 
 ```bash
-uv run scripts/train.py          # ~7 seconds
+uv run alembic upgrade head   # create the schema
+uv run scripts/seed_db.py     # data/*.csv -> training_records + students
+uv run scripts/train.py       # train -> model_versions (marked active)  ~7 seconds
 ```
 
-Writes `models/model.joblib` and `models/metrics.json`.
+`scripts/train.py` stores the fitted pipeline and its metrics as a new `model_versions`
+row and makes it the active one. There are no model files.
 
 ### Serve
 
@@ -137,13 +146,12 @@ Interactive API docs: <http://localhost:8000/docs>
 uv run scripts/analyze.py        # writes reports/analysis.{md,json}
 ```
 
-### Set up the database (optional)
+### Create a user (optional)
 
-Only needed to log predictions and use `GET /predictions`.
+The `users` table exists for the authentication work that comes next:
 
 ```bash
-export DATABASE_URL="postgresql://user:password@localhost:5432/dropout_db"
-uv run alembic upgrade head
+uv run scripts/create_user.py --email you@example.edu --role admin
 ```
 
 A bare `postgresql://` URL is rewritten to `postgresql+psycopg://` automatically, so a URL
@@ -160,7 +168,7 @@ copied from a hosted provider works unchanged.
 | GET | `/model/info` | Model metadata, threshold and test metrics |
 | POST | `/predict` | Assess one student |
 | POST | `/predict/batch` | Assess up to 100 students |
-| GET | `/predictions` | Paginated audit log (requires a database) |
+| GET | `/predictions` | Paginated audit log, newest first |
 | GET | `/docs` | Interactive OpenAPI documentation |
 
 ### Example
@@ -251,7 +259,7 @@ See `.env.example` for the annotated list.
 | `TARGET_RECALL` | **yes** | Recall the decision threshold must reach |
 | `RISK_THRESHOLD_MEDIUM` | **yes** | Lower bound of the `medio` band |
 | `RISK_THRESHOLD_HIGH` | **yes** | Lower bound of the `alto` band |
-| `DATABASE_URL` | no | PostgreSQL connection. Unset = no prediction logging |
+| `DATABASE_URL` | **yes** | PostgreSQL connection |
 | `LOG_LEVEL` | no (`INFO`) | Logging verbosity |
 
 Never set `CORS_ORIGINS` to `*`: the API is called with credentials.
@@ -269,21 +277,22 @@ docker tag dropout-service:1.0.0 <registry>/dropout-service:1.0.0
 docker push <registry>/dropout-service:1.0.0
 ```
 
-The image carries the trained model but not `data/`. Run `alembic upgrade head` before
-starting a new version if you use the database. Required settings are supplied at run time
-(`--env-file`), never baked into the image.
+The image carries **neither** the training data nor a model: it reads the active model
+version from the database at startup, so one image works against any environment. Run
+`alembic upgrade head` before a new version serves traffic. Required settings are supplied
+at run time (`--env-file`), never baked into the image.
 
 ---
 
 ## Development
 
 ```bash
-uv run pytest -v            # 79 tests
+uv run pytest -v            # 93 tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
 
-### Three design rules worth knowing before you change anything
+### Four design rules worth knowing before you change anything
 
 **1. Add a feature in exactly one place.** Every feature is a field on `StudentFeatures` in
 `ml/schema.py`; the categorical and numeric lists are *derived* from it by introspection. The
@@ -305,11 +314,20 @@ so an accidental import would pass every local test and fail only in production.
 must never import FastAPI or the HTTP slices, so the model stays usable from a notebook or
 a batch job. `tests/test_layering.py` enforces both.
 
-A consequence worth knowing: `model.joblib` pickles a function from `ml/schema.py` by
+A consequence worth knowing: the stored artefact pickles a function from `ml/schema.py` by
 import path, so **moving Python modules invalidates every previously trained model** with
 `ModuleNotFoundError`. Retrain after any such refactor — it is deterministic and takes
 seconds. It is also why the preprocessing lives in `ml/schema.py` and not under
 `ml/training/`: loading a model must not drag training code into the API.
+
+**4. The database holds the state; `ml/` holds none of it.** The artefact is a `BYTEA`
+column and the metrics a `JSONB` one, because a fitted scikit-learn pipeline is *not*
+JSON-serialisable — it carries numpy arrays, learned categories and scaler statistics.
+`Predictor.from_bytes` takes bytes so the database read stays in
+`model_registry/service.py`, which is what keeps `ml/` free of SQLAlchemy. Training
+features are stored as one `JSONB` payload rather than 34 columns, for exactly the reason
+rule 1 exists: a mirrored column list would be a second copy of the feature set, free to
+drift.
 
 ---
 
