@@ -1,0 +1,24 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+.idea
+.vscode
+.env
+.env.local
+# Training data is only needed offline; the image ships the trained model instead.
+data/
+reports/
+docs/
+tests/
+scripts/
+# NOTE: README.md must stay in the build context -- pyproject.toml declares it as the
+# project readme, so hatchling fails to build the wheel without it.
+*.md
+!README.md
