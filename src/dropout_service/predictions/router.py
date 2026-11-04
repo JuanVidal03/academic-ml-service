@@ -1,7 +1,4 @@
-"""Prediction endpoints.
-
-Mounted under ``/api/v1`` by ``dropout_service.router``.
-"""
+"""Prediction endpoints."""
 
 from typing import Annotated
 
@@ -9,12 +6,12 @@ from fastapi import APIRouter, BackgroundTasks, Query
 
 from dropout_service.dependencies import PredictorDep, SessionDep, SessionFactoryDep
 from dropout_service.ml.predict import PredictionResult
-from dropout_service.ml.schema import StudentFeatures
 from dropout_service.predictions.schemas import (
     BatchPredictionRequest,
     BatchPredictionResponse,
     PaginatedPredictions,
     PredictionRecord,
+    PredictionRequest,
 )
 from dropout_service.predictions.service import fetch_predictions_page, log_predictions
 
@@ -23,14 +20,14 @@ router = APIRouter(tags=["predictions"])
 
 @router.post("/predict", response_model=PredictionResult)
 async def predict(
-    student: StudentFeatures,
+    student: PredictionRequest,
     background: BackgroundTasks,
     predictor: PredictorDep,
     factory: SessionFactoryDep,
 ) -> PredictionResult:
     """Assess a single student's dropout risk."""
     result = predictor.predict([student])[0]
-    background.add_task(log_predictions, factory, [student], [result], predictor.model_version)
+    background.add_task(log_predictions, factory, [student], [result], predictor.model_version_id)
     return result
 
 
@@ -44,7 +41,7 @@ async def predict_batch(
     """Assess up to 100 students in one call. Results keep the submitted order."""
     results = predictor.predict(payload.students)
     background.add_task(
-        log_predictions, factory, payload.students, results, predictor.model_version
+        log_predictions, factory, payload.students, results, predictor.model_version_id
     )
     return BatchPredictionResponse(predictions=results, count=len(results))
 
@@ -64,7 +61,8 @@ async def list_predictions(
                 deserta=row.prediction,
                 probabilidad=row.probability,
                 riesgo=row.risk_level,
-                model_version=row.model_version,
+                model_version_id=row.model_version_id,
+                student_id=row.student_id,
                 created_at=row.created_at,
             )
             for row in rows

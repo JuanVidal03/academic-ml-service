@@ -17,6 +17,7 @@ from dropout_service.ml.schema import StudentFeatures
 
 __all__ = [
     "BatchPredictionRequest",
+    "PredictionRequest",
     "BatchPredictionResponse",
     "HealthResponse",
     "ModelInfoResponse",
@@ -29,10 +30,23 @@ __all__ = [
 MAX_BATCH_SIZE = 100
 
 
+class PredictionRequest(StudentFeatures):
+    """A single prediction request: the features, plus an optional student code.
+
+    ``codigo`` is **not** a model feature -- it never reaches ``StudentFeatures``'
+    derived feature lists, so it cannot influence the prediction. It only lets the audit
+    row be linked to a student, which is what makes risk history answerable.
+    """
+
+    codigo: str | None = Field(
+        None, max_length=32, description="Institutional student code; links the audit row"
+    )
+
+
 class BatchPredictionRequest(BaseModel):
     """Several students in one call."""
 
-    students: list[StudentFeatures] = Field(..., min_length=1, max_length=MAX_BATCH_SIZE)
+    students: list[PredictionRequest] = Field(..., min_length=1, max_length=MAX_BATCH_SIZE)
 
 
 class BatchPredictionResponse(BaseModel):
@@ -69,7 +83,8 @@ class PredictionRecord(BaseModel):
     deserta: bool
     probabilidad: float
     riesgo: RiskLevel
-    model_version: str | None
+    model_version_id: int | None
+    student_id: int | None
     created_at: datetime
 
 

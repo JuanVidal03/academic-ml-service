@@ -11,17 +11,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from dropout_service.ml.predict import PredictionResult
-from dropout_service.ml.schema import StudentFeatures
 from dropout_service.predictions.models import Prediction
+from dropout_service.predictions.schemas import PredictionRequest
+from dropout_service.students.service import upsert_by_codigo
 
 logger = logging.getLogger(__name__)
 
 
 def log_predictions(
     factory: sessionmaker | None,
-    students: Sequence[StudentFeatures],
+    students: Sequence[PredictionRequest],
     results: Sequence[PredictionResult],
-    model_version: str,
+    model_version_id: int | None,
 ) -> None:
     """Persist one audit row per prediction, in a single transaction.
 
@@ -35,18 +36,22 @@ def log_predictions(
         return
     try:
         with factory() as session:
-            session.add_all(
-                [
+            for student, result in zip(students, results, strict=True):
+                payload = student.model_dump(mode="json")
+                codigo = payload.pop("codigo", None)
+                linked = (
+                    upsert_by_codigo(session, codigo, payload.get("programa")) if codigo else None
+                )
+                session.add(
                     Prediction(
-                        input_data=student.model_dump(mode="json"),
+                        input_data=payload,
                         probability=result.probabilidad,
                         prediction=result.deserta,
                         risk_level=result.riesgo,
-                        model_version=model_version,
+                        model_version_id=model_version_id,
+                        student_id=linked.id if linked else None,
                     )
-                    for student, result in zip(students, results, strict=True)
-                ]
-            )
+                )
             session.commit()
     except Exception:
         logger.exception("Failed to write %d prediction log row(s)", len(results))
