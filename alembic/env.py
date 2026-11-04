@@ -16,7 +16,11 @@ from dropout_service.database import SCHEMA, Base
 # Without these imports `alembic revision --autogenerate` would see the tables in the
 # database but not in the metadata, and emit a migration that DROPS them. Add a line here
 # for every new slice that owns tables.
+from dropout_service.model_registry import models as _model_registry_models  # noqa: E402,F401
 from dropout_service.predictions import models as _predictions_models  # noqa: E402,F401
+from dropout_service.students import models as _students_models  # noqa: E402,F401
+from dropout_service.training_data import models as _training_data_models  # noqa: E402,F401
+from dropout_service.users import models as _users_models  # noqa: E402,F401
 
 config = context.config
 
