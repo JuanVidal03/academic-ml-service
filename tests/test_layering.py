@@ -57,7 +57,7 @@ def test_ml_domain_does_not_import_fastapi():
     _assert_clean_import("""
         import sys
         import dropout_service.ml.predict  # noqa: F401
-        import dropout_service.ml.pipeline  # noqa: F401
+        import dropout_service.ml.schema  # noqa: F401
 
         assert "fastapi" not in sys.modules, "ml domain pulled in fastapi"
     """)

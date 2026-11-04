@@ -15,9 +15,8 @@ from sklearn.linear_model import LogisticRegression
 
 from dropout_service.config import Settings
 from dropout_service.main import create_app
-from dropout_service.ml.pipeline import build_pipeline
 from dropout_service.ml.predict import Predictor
-from dropout_service.ml.schema import ALL_FEATURES
+from dropout_service.ml.schema import ALL_FEATURES, build_pipeline
 from dropout_service.ml.training.data import load_dataset
 
 SAMPLE_SIZE = 600
@@ -57,10 +56,39 @@ def models_dir(tmp_path_factory, dataset) -> Path:
     return directory
 
 
+#: The settings that now have no code-side default. Tests must supply them explicitly,
+#: which also keeps the suite independent of whatever is in the developer's .env.
+REQUIRED_SETTINGS: dict = {
+    "cors_origins": ["http://testserver"],
+    "test_size": 0.2,
+    "cv_folds": 5,
+    "random_state": 42,
+    "target_recall": 0.80,
+    "risk_threshold_medium": 0.30,
+    "risk_threshold_high": 0.60,
+}
+
+
+def _make_settings(**overrides) -> Settings:
+    """Build Settings with every required field supplied, ignoring the on-disk .env."""
+    return Settings(_env_file=None, **{**REQUIRED_SETTINGS, **overrides})
+
+
 @pytest.fixture(scope="session")
 def test_settings(models_dir) -> Settings:
     """Settings isolated from the developer's .env (no database, fixture model)."""
-    return Settings(models_dir=models_dir, database_url=None, log_level="WARNING")
+    return _make_settings(models_dir=models_dir, database_url=None, log_level="WARNING")
+
+
+@pytest.fixture
+def settings_factory(models_dir):
+    """Factory for ad-hoc Settings in tests that need their own configuration."""
+
+    def _factory(**overrides) -> Settings:
+        # Merge rather than pass both, so a test can override models_dir itself.
+        return _make_settings(**{"models_dir": models_dir, **overrides})
+
+    return _factory
 
 
 @pytest.fixture(scope="session")

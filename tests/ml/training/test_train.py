@@ -5,7 +5,7 @@ import json
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
-from dropout_service.ml.pipeline import build_pipeline
+from dropout_service.ml.schema import build_pipeline
 from dropout_service.ml.training.train import PARAM_GRIDS, evaluate, select_threshold
 
 

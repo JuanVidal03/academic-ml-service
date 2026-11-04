@@ -1,11 +1,10 @@
 """HTTP contract for the prediction endpoints."""
 
 from dropout_service.predictions.schemas import MAX_BATCH_SIZE
-from dropout_service.router import API_V1_PREFIX
 
-PREDICT = f"{API_V1_PREFIX}/predict"
-BATCH = f"{API_V1_PREFIX}/predict/batch"
-HISTORY = f"{API_V1_PREFIX}/predictions"
+PREDICT = "/predict"
+BATCH = "/predict/batch"
+HISTORY = "/predictions"
 
 
 def test_predict_returns_a_complete_result(client, student):
@@ -69,11 +68,5 @@ def test_history_requires_a_database(client):
     assert "DATABASE_URL" in response.json()["detail"]
 
 
-def test_unprefixed_paths_are_not_served(client, student):
-    """Business endpoints live under /api/v1 only -- guards the versioning decision."""
-    assert client.post("/predict", json=student).status_code == 404
-    assert client.get("/predictions").status_code == 404
-
-
 def test_removed_records_endpoint_is_gone(client, student):
-    assert client.post(f"{API_V1_PREFIX}/records", json=student).status_code == 404
+    assert client.post("/records", json=student).status_code == 404
