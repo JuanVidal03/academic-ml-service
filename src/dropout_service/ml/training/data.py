@@ -1,12 +1,11 @@
 """Loading the training dataset and splitting it.
 
 Deliberately thin: no imputation, no scaling, no encoding. Anything that learns a statistic
-from the data belongs in :mod:`dropout_service.ml.pipeline` so that cross-validation refits it per
+from the data belongs in :mod:`dropout_service.ml.schema` so that cross-validation refits it per
 fold. See that module for why.
 """
 
 import logging
-from pathlib import Path
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -17,40 +16,47 @@ from dropout_service.ml.schema import ALL_FEATURES, TARGET_COLUMN, TARGET_MAP
 logger = logging.getLogger(__name__)
 
 
-def load_dataset(csv_path: Path | None = None) -> tuple[pd.DataFrame, pd.Series]:
-    """Read the dataset and return ``(X, y)``.
+def prepare_dataset(frame: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """Validate a raw training frame and return ``(X, y)``.
+
+    Takes a frame rather than reading a file, so this module stays free of any knowledge of
+    where the data lives -- the database read is ``training_data/service.py``.
 
     ``X`` holds exactly the feature columns in :data:`ALL_FEATURES` order; ``y`` is the
-    binary dropout label. Columns absent from the CSV are created as all-missing so the
+    binary dropout label. Columns absent from the frame are created as all-missing so the
     pipeline's imputers handle them, rather than raising a ``KeyError`` here.
 
     Raises:
-        FileNotFoundError: if the dataset is missing.
         ValueError: if the target column is absent or holds unmappable values.
     """
-    path = csv_path or get_settings().csv_path
-    if not path.exists():
-        raise FileNotFoundError(f"Dataset not found at {path}")
-
-    df = pd.read_csv(path)
+    df = frame.copy()
     if TARGET_COLUMN not in df.columns:
-        raise ValueError(f"Dataset is missing the target column {TARGET_COLUMN!r}")
+        raise ValueError(f"Training data is missing the target column {TARGET_COLUMN!r}")
 
-    y = df[TARGET_COLUMN].map(TARGET_MAP)
-    if y.isna().any():
-        unexpected = sorted(set(df.loc[y.isna(), TARGET_COLUMN].astype(str)))
-        raise ValueError(f"Target column has values outside {set(TARGET_MAP)}: {unexpected}")
+    y = df[TARGET_COLUMN]
+    # The database stores the label as a boolean; the CSV stores "Si"/"No". bool is a
+    # subclass of int, so {0, 1} covers True/False too.
+    if y.dtype == bool or set(y.dropna().unique()) <= {0, 1}:
+        y = y.astype(int)
+    else:
+        y = y.map(TARGET_MAP)
+        if y.isna().any():
+            unexpected = sorted(set(df.loc[y.isna(), TARGET_COLUMN].astype(str)))
+            raise ValueError(f"Target has values outside {set(TARGET_MAP)}: {unexpected}")
+        y = y.astype(int)
 
     missing = [c for c in ALL_FEATURES if c not in df.columns]
     if missing:
         logger.warning(
-            "Dataset lacks %d feature column(s), treating as missing: %s", len(missing), missing
+            "Training data lacks %d feature column(s), treating as missing: %s",
+            len(missing),
+            missing,
         )
         for col in missing:
             df[col] = None
 
-    logger.info("Loaded %d rows from %s (dropout rate %.1f%%)", len(df), path.name, 100 * y.mean())
-    return df[ALL_FEATURES], y.astype(int)
+    logger.info("Prepared %d rows (dropout rate %.1f%%)", len(df), 100 * y.mean())
+    return df[ALL_FEATURES], y
 
 
 def split_dataset(

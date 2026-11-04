@@ -15,14 +15,14 @@ from sklearn.feature_selection import mutual_info_classif
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 
-from dropout_service.ml.pipeline import build_pipeline
 from dropout_service.ml.schema import (
     ALL_FEATURES,
     CATEGORICAL_FEATURES,
     CATEGORICAL_FILL,
     NUMERIC_FEATURES,
+    build_pipeline,
 )
-from dropout_service.ml.training.data import load_dataset, split_dataset
+from dropout_service.ml.training.data import prepare_dataset, split_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +159,9 @@ def feature_importance(
     return dict(sorted(ranked.items(), key=lambda kv: kv[1]["importance"], reverse=True))
 
 
-def run_analysis() -> dict[str, Any]:
-    """Compute the full analysis."""
-    X, y = load_dataset()
+def run_analysis(frame: pd.DataFrame) -> dict[str, Any]:
+    """Compute the full analysis for a training frame."""
+    X, y = prepare_dataset(frame)
     logger.info("Analysing %d records...", len(X))
     return {
         "dataset": describe_dataset(X, y),

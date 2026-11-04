@@ -1,12 +1,9 @@
 """Model selection, tuning, threshold calibration and persistence."""
 
-import json
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
-import joblib
 import pandas as pd
 from sklearn.base import BaseEstimator, clone
 from sklearn.calibration import CalibratedClassifierCV
@@ -35,9 +32,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.svm import SVC
 
 from dropout_service.config import get_settings
-from dropout_service.ml.pipeline import build_pipeline
-from dropout_service.ml.schema import ALL_FEATURES
-from dropout_service.ml.training.data import load_dataset, split_dataset
+from dropout_service.ml.schema import ALL_FEATURES, build_pipeline
+from dropout_service.ml.training.data import prepare_dataset, split_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -196,29 +192,26 @@ def evaluate(
     }
 
 
-def save_model(
-    pipeline: Pipeline,
-    metadata: dict[str, Any],
-    models_dir: Path,
-) -> tuple[Path, Path]:
-    """Persist the pipeline and its metadata side by side."""
-    models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = models_dir / "model.joblib"
-    metrics_path = models_dir / "metrics.json"
-    joblib.dump(pipeline, model_path)
-    metrics_path.write_text(json.dumps(metadata, indent=2))
-    return model_path, metrics_path
+class TrainingResult(NamedTuple):
+    """What a training run produced. Persisting it is the caller's job."""
+
+    pipeline: Pipeline
+    metadata: dict[str, Any]
 
 
-def run_training(models_dir: Path | None = None, csv_path: Path | None = None) -> dict[str, Any]:
-    """Run the full training flow and persist the result."""
+def run_training(frame: pd.DataFrame) -> TrainingResult:
+    """Run the full training flow against ``frame`` and return the fitted pipeline.
+
+    Deliberately does not persist anything: the caller decides where the artefact goes
+    (``model_registry/service.py:save_version``). That keeps this module free of any
+    storage concern, which is what lets it run from a notebook or a batch job.
+    """
     settings = get_settings()
-    models_dir = models_dir or settings.models_dir
     cv = StratifiedKFold(
         n_splits=settings.cv_folds, shuffle=True, random_state=settings.random_state
     )
 
-    X, y = load_dataset(csv_path)
+    X, y = prepare_dataset(frame)
     X_train, X_test, y_train, y_test = split_dataset(X, y)
 
     comparison = compare_models(X_train, y_train, cv)
@@ -258,14 +251,4 @@ def run_training(models_dir: Path | None = None, csv_path: Path | None = None) -
         "test_metrics": metrics,
         "comparison": comparison.to_dict(orient="records"),
     }
-
-    model_path, metrics_path = save_model(pipeline, metadata, models_dir)
-    logger.info("Saved model to %s and metrics to %s", model_path, metrics_path)
-
-    return {
-        "model_path": str(model_path),
-        "metrics_path": str(metrics_path),
-        "best_model": best_name,
-        "decision_threshold": threshold,
-        "test_metrics": metrics,
-    }
+    return TrainingResult(pipeline=pipeline, metadata=metadata)
