@@ -1,0 +1,153 @@
+{
+  "model_name": "LogisticRegression",
+  "model_version": "2026-11-03T00:07:09.479922+00:00",
+  "features": [
+    "programa",
+    "area_materia_critica",
+    "genero",
+    "tipo_admision",
+    "modalidad",
+    "trabaja",
+    "recibe_beca",
+    "beca_perdida_en_periodo",
+    "dificultad_economica",
+    "tiene_hijos",
+    "nivel_educativo_padres",
+    "participacion_extracurricular",
+    "uso_tutorias",
+    "semestre",
+    "materias_matriculadas",
+    "materias_aprobadas",
+    "materias_reprobadas",
+    "materias_repetidas",
+    "materias_canceladas",
+    "semestres_repetidos",
+    "numero_materias_con_perdida_historica",
+    "nota_promedio",
+    "promedio_semestre_anterior",
+    "promedio_acumulado",
+    "porcentaje_asistencia",
+    "inasistencias",
+    "horas_estudio_semana",
+    "edad",
+    "estrato",
+    "distancia_a_universidad_km",
+    "horas_trabajo_semana",
+    "ingreso_familiar",
+    "apoyo_familiar_percibido",
+    "satisfaccion_con_programa"
+  ],
+  "n_features": 34,
+  "n_train_rows": 2400,
+  "n_test_rows": 600,
+  "best_params": {
+    "classifier__C": "0.05"
+  },
+  "decision_threshold": 0.35053158856070843,
+  "target_recall": 0.8,
+  "risk_bands": {
+    "bajo": [
+      0.0,
+      0.3
+    ],
+    "medio": [
+      0.3,
+      0.6
+    ],
+    "alto": [
+      0.6,
+      1.0
+    ]
+  },
+  "test_metrics": {
+    "roc_auc": 0.7695275919260756,
+    "accuracy": 0.68,
+    "precision": 0.6028985507246377,
+    "recall": 0.7908745247148289,
+    "f1": 0.6842105263157895,
+    "classification_report": {
+      "0": {
+        "precision": 0.7843137254901961,
+        "recall": 0.5934718100890207,
+        "f1-score": 0.6756756756756757,
+        "support": 337.0
+      },
+      "1": {
+        "precision": 0.6028985507246377,
+        "recall": 0.7908745247148289,
+        "f1-score": 0.6842105263157895,
+        "support": 263.0
+      },
+      "accuracy": 0.68,
+      "macro avg": {
+        "precision": 0.6936061381074169,
+        "recall": 0.6921731674019248,
+        "f1-score": 0.6799431009957326,
+        "support": 600.0
+      },
+      "weighted avg": {
+        "precision": 0.7047934072179597,
+        "recall": 0.68,
+        "f1-score": 0.6794167852062588,
+        "support": 600.0
+      }
+    }
+  },
+  "comparison": [
+    {
+      "model": "LogisticRegression",
+      "roc_auc_mean": 0.7740731100674957,
+      "roc_auc_std": 0.006133932837944331,
+      "f1_mean": 0.6498951578098242,
+      "f1_std": 0.01952995763160217,
+      "recall_mean": 0.618627849243963,
+      "recall_std": 0.02983538684065155,
+      "accuracy_mean": 0.7074999999999999,
+      "accuracy_std": 0.01638300270944793
+    },
+    {
+      "model": "SVM",
+      "roc_auc_mean": 0.7589539393841092,
+      "roc_auc_std": 0.009393317490367212,
+      "f1_mean": 0.6356449515143454,
+      "f1_std": 0.019763394066752028,
+      "recall_mean": 0.6053306251410516,
+      "recall_std": 0.03644997879620878,
+      "accuracy_mean": 0.6958333333333333,
+      "accuracy_std": 0.01277475809729657
+    },
+    {
+      "model": "GradientBoosting",
+      "roc_auc_mean": 0.7573024344118033,
+      "roc_auc_std": 0.005563983857589835,
+      "f1_mean": 0.6419547301889817,
+      "f1_std": 0.01776090119258422,
+      "recall_mean": 0.6204965019183029,
+      "recall_std": 0.026418205563050298,
+      "accuracy_mean": 0.69625,
+      "accuracy_std": 0.014031215200402269
+    },
+    {
+      "model": "RandomForest",
+      "roc_auc_mean": 0.7571099012244381,
+      "roc_auc_std": 0.0055851223788159115,
+      "f1_mean": 0.6294548682330212,
+      "f1_std": 0.012246386421755667,
+      "recall_mean": 0.5996298803881742,
+      "recall_std": 0.032933968922340406,
+      "accuracy_mean": 0.6904166666666667,
+      "accuracy_std": 0.008799463367476166
+    },
+    {
+      "model": "HistGradientBoosting",
+      "roc_auc_mean": 0.7329720194169767,
+      "roc_auc_std": 0.005796150218099225,
+      "f1_mean": 0.6121101102798343,
+      "f1_std": 0.008702821684728503,
+      "recall_mean": 0.5872669826224328,
+      "recall_std": 0.022392237880200356,
+      "accuracy_mean": 0.6733333333333332,
+      "accuracy_std": 0.007614861201040463
+    }
+  ]
+}
