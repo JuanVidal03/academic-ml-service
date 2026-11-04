@@ -1,7 +1,5 @@
 """Training pipeline."""
 
-import json
-
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 
@@ -59,8 +57,12 @@ def test_evaluate_uses_the_given_threshold(dataset):
     assert permissive["roc_auc"] == strict["roc_auc"]
 
 
-def test_run_training_writes_model_and_metrics(tmp_path, monkeypatch):
-    """End-to-end on a reduced search space, so the test stays fast."""
+def test_run_training_returns_a_fitted_pipeline_and_metadata(raw_frame, monkeypatch):
+    """End-to-end on a reduced search space, so the test stays fast.
+
+    run_training persists nothing: the caller stores the artefact. That is what keeps the
+    ML package free of any database concern.
+    """
     import dropout_service.ml.training.train as train_module
 
     monkeypatch.setattr(
@@ -70,10 +72,9 @@ def test_run_training_writes_model_and_metrics(tmp_path, monkeypatch):
         train_module, "PARAM_GRIDS", {"LogisticRegression": {"classifier__C": [1.0]}}
     )
 
-    result = train_module.run_training(models_dir=tmp_path)
+    result = train_module.run_training(raw_frame.sample(n=600, random_state=0))
 
-    assert (tmp_path / "model.joblib").exists()
-    metadata = json.loads((tmp_path / "metrics.json").read_text())
-    assert "decision_threshold" in metadata
-    assert metadata["n_features"] == len(metadata["features"])
-    assert 0.5 < result["test_metrics"]["roc_auc"] <= 1.0
+    assert hasattr(result.pipeline, "predict_proba")
+    assert "decision_threshold" in result.metadata
+    assert result.metadata["n_features"] == len(result.metadata["features"])
+    assert 0.5 < result.metadata["test_metrics"]["roc_auc"] <= 1.0

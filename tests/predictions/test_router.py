@@ -61,11 +61,28 @@ def test_missing_required_field_is_rejected(client, student):
     assert client.post(PREDICT, json=student).status_code == 422
 
 
-def test_history_requires_a_database(client):
-    """Without DATABASE_URL this endpoint cannot work, and says so."""
+def test_history_returns_a_page(client):
+    """Served from a faked session, so no database is involved."""
     response = client.get(HISTORY)
-    assert response.status_code == 503
-    assert "DATABASE_URL" in response.json()["detail"]
+    assert response.status_code == 200
+    body = response.json()
+    assert body["page"] == 1
+    assert body["items"] == []
+    assert body["total"] == 0
+
+
+def test_predict_links_the_audit_row_to_a_student(client, student):
+    """A supplied codigo must reach the audit row without altering the prediction."""
+    without = client.post(PREDICT, json=student).json()
+    with_code = client.post(PREDICT, json=dict(student, codigo="ABC123")).json()
+    assert without["probabilidad"] == with_code["probabilidad"]
+
+
+def test_codigo_is_not_a_model_feature():
+    """If it leaked into the feature lists it would change the model."""
+    from dropout_service.ml.schema import ALL_FEATURES
+
+    assert "codigo" not in ALL_FEATURES
 
 
 def test_removed_records_endpoint_is_gone(client, student):

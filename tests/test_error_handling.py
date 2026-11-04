@@ -23,11 +23,13 @@ def test_unreachable_database_returns_503_not_500(settings_factory):
     assert response.json()["detail"] == "Database unavailable."
 
 
-def test_predictions_still_work_when_the_database_is_down(settings_factory, student):
-    """Logging is best-effort, so a dead database must not break predicting."""
-    settings = settings_factory(database_url=UNREACHABLE_DB, log_level="CRITICAL")
-    with TestClient(create_app(settings)) as client:
-        response = client.post("/predict", json=student)
+def test_predictions_still_work_when_the_database_is_down(client, student):
+    """Logging is best-effort, so a dead database must not break predicting.
+
+    The client fixture already points at an unreachable database, with the predictor
+    injected -- which is exactly the degraded-but-serving state this asserts.
+    """
+    response = client.post("/predict", json=student)
 
     assert response.status_code == 200
     assert 0.0 <= response.json()["probabilidad"] <= 1.0

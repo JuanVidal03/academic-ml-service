@@ -5,45 +5,9 @@ from pydantic import ValidationError
 
 from dropout_service.config import Settings
 
-
-@pytest.mark.parametrize(
-    ("given", "expected"),
-    [
-        ("postgresql://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
-        ("postgres://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
-        # Already explicit: left untouched.
-        ("postgresql+psycopg://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
-        ("sqlite:///local.db", "sqlite:///local.db"),
-    ],
-)
-def test_database_url_is_normalised_to_the_installed_driver(settings_factory, given, expected):
-    """Providers inject bare postgresql:// URLs, which resolve to the absent psycopg2."""
-    assert settings_factory(database_url=given).database_url == expected
-
-
-def test_database_url_may_be_absent(settings_factory):
-    assert settings_factory(database_url=None).database_url is None
-
-
-def test_derived_paths_follow_models_dir(settings_factory, tmp_path):
-    settings = settings_factory(models_dir=tmp_path)
-    assert settings.model_path == tmp_path / "model.joblib"
-    assert settings.metrics_path == tmp_path / "metrics.json"
-
-
-def test_csv_path_follows_data_dir(settings_factory, tmp_path):
-    settings = settings_factory(data_dir=tmp_path, dataset_filename="x.csv")
-    assert settings.csv_path == tmp_path / "x.csv"
-
-
-def test_version_comes_from_package_metadata():
-    """The version is declared only in pyproject.toml; everything else reads it."""
-    import dropout_service
-
-    assert dropout_service.__version__ != "0.0.0+unknown"
-
-
+#: Every field with no code-side default. A missing one must abort startup.
 REQUIRED_FIELDS = {
+    "database_url",
     "cors_origins",
     "test_size",
     "cv_folds",
@@ -54,8 +18,22 @@ REQUIRED_FIELDS = {
 }
 
 
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("postgresql://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
+        ("postgres://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
+        # Already explicit: left untouched.
+        ("postgresql+psycopg://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
+    ],
+)
+def test_database_url_is_normalised_to_the_installed_driver(settings_factory, given, expected):
+    """Providers inject bare postgresql:// URLs, which resolve to the absent psycopg2."""
+    assert settings_factory(database_url=given).database_url == expected
+
+
 def test_tuneable_settings_have_no_code_side_default(monkeypatch):
-    """The whole point of the change: a missing value must fail, not be invented.
+    """The whole point: a missing value must fail, not be invented.
 
     Ignores the on-disk .env and clears the environment, so this asserts the absence of
     defaults in the model rather than the presence of a local .env.
@@ -70,8 +48,33 @@ def test_tuneable_settings_have_no_code_side_default(monkeypatch):
     assert missing == REQUIRED_FIELDS
 
 
-def test_optional_settings_keep_their_fallbacks(settings_factory):
-    """database_url and log_level are deliberately still optional."""
+def test_database_url_is_required(settings_factory, monkeypatch):
+    """The database holds the model, the training data and the audit log."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, **dict.fromkeys(REQUIRED_FIELDS - {"database_url"}, 1))
+    assert "database_url" in {err["loc"][0] for err in excinfo.value.errors()}
+
+
+def test_log_level_keeps_its_fallback(settings_factory):
+    """log_level is the one tuneable that is still optional."""
+    assert settings_factory().log_level == "INFO"
+
+
+def test_csv_path_follows_data_dir(settings_factory, tmp_path):
+    settings = settings_factory(data_dir=tmp_path, dataset_filename="x.csv")
+    assert settings.csv_path == tmp_path / "x.csv"
+
+
+def test_model_file_paths_are_gone(settings_factory):
+    """The model lives in the database, so there are no artefact paths to configure."""
     settings = settings_factory()
-    assert settings.database_url is None
-    assert settings.log_level == "INFO"
+    assert not hasattr(settings, "model_path")
+    assert not hasattr(settings, "models_dir")
+
+
+def test_version_comes_from_package_metadata():
+    """The version is declared only in pyproject.toml; everything else reads it."""
+    import dropout_service
+
+    assert dropout_service.__version__ != "0.0.0+unknown"

@@ -1,13 +1,13 @@
-"""Dataset loading and splitting."""
+"""Preparing a raw training frame and splitting it."""
 
 import pandas as pd
 import pytest
 
 from dropout_service.ml.schema import ALL_FEATURES, TARGET_COLUMN
-from dropout_service.ml.training.data import load_dataset, split_dataset
+from dropout_service.ml.training.data import prepare_dataset, split_dataset
 
 
-def test_load_dataset_returns_features_and_binary_target(dataset):
+def test_prepare_returns_features_and_binary_target(dataset):
     X, y = dataset
     assert len(X) == 3000
     assert list(X.columns) == ALL_FEATURES
@@ -15,8 +15,8 @@ def test_load_dataset_returns_features_and_binary_target(dataset):
     assert len(X) == len(y)
 
 
-def test_load_dataset_does_not_impute(dataset):
-    """Imputation belongs to the pipeline, so missing values must survive loading.
+def test_prepare_does_not_impute(dataset):
+    """Imputation belongs to the pipeline, so missing values must survive preparation.
 
     If this starts failing because nulls were filled here, the median leak is back.
     """
@@ -36,43 +36,35 @@ def test_identifier_columns_are_excluded(dataset):
         assert column not in X.columns
 
 
-def test_missing_file_raises(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        load_dataset(tmp_path / "nope.csv")
+def test_boolean_target_is_accepted(raw_frame):
+    """The database stores the label as a boolean; the CSV stores Si/No. Both must work."""
+    frame = raw_frame.head(20).copy()
+    frame[TARGET_COLUMN] = [i % 2 == 0 for i in range(20)]
+    _, y = prepare_dataset(frame)
+    assert set(y.unique()) <= {0, 1}
+    assert y.dtype.kind == "i"
 
 
-def test_unmappable_target_is_reported(tmp_path, dataset):
+def test_unmappable_target_is_reported(raw_frame):
     """A corrupt target must fail loudly rather than produce silent NaN labels."""
-    X, y = dataset
-    frame = X.head(5).copy()
+    frame = raw_frame.head(5).copy()
     frame[TARGET_COLUMN] = ["Si", "No", "Maybe", "Si", "No"]
-    path = tmp_path / "bad.csv"
-    frame.to_csv(path, index=False)
-
     with pytest.raises(ValueError, match="Maybe"):
-        load_dataset(path)
+        prepare_dataset(frame)
 
 
-def test_missing_target_column_is_reported(tmp_path, dataset):
-    X, _ = dataset
-    path = tmp_path / "no_target.csv"
-    X.head(5).to_csv(path, index=False)
-
+def test_missing_target_column_is_reported(raw_frame):
+    frame = raw_frame.head(5).drop(columns=[TARGET_COLUMN])
     with pytest.raises(ValueError, match=TARGET_COLUMN):
-        load_dataset(path)
+        prepare_dataset(frame)
 
 
-def test_absent_feature_column_becomes_missing_not_an_error(tmp_path, dataset):
-    """A dataset lacking an optional column should still load; imputers handle the gap."""
-    X, y = dataset
-    frame = X.head(20).drop(columns=["horas_estudio_semana"]).copy()
-    frame[TARGET_COLUMN] = ["Si" if v else "No" for v in y.head(20)]
-    path = tmp_path / "partial.csv"
-    frame.to_csv(path, index=False)
-
-    loaded_X, _ = load_dataset(path)
-    assert list(loaded_X.columns) == ALL_FEATURES
-    assert loaded_X["horas_estudio_semana"].isna().all()
+def test_absent_feature_column_becomes_missing_not_an_error(raw_frame):
+    """A frame lacking an optional column should still prepare; imputers handle the gap."""
+    frame = raw_frame.head(20).drop(columns=["horas_estudio_semana"])
+    X, _ = prepare_dataset(frame)
+    assert list(X.columns) == ALL_FEATURES
+    assert X["horas_estudio_semana"].isna().all()
 
 
 def test_split_is_stratified_and_sized(dataset):

@@ -69,6 +69,22 @@ def test_risk_bands(predictor, probability, expected):
     assert predictor.risk_level(probability) == expected
 
 
-def test_missing_model_file_explains_how_to_fix_it(tmp_path):
-    with pytest.raises(FileNotFoundError, match="scripts/train.py"):
-        Predictor.from_disk(tmp_path / "absent.joblib", tmp_path / "absent.json")
+def test_dump_and_from_bytes_round_trip(predictor, model_artifact, student):
+    """The artefact stored in BYTEA must rebuild an identical predictor."""
+    artifact, metadata = model_artifact
+    rebuilt = Predictor.from_bytes(Predictor.dump(predictor.pipeline), metadata)
+
+    original = predictor.predict([StudentFeatures(**student)])[0]
+    again = rebuilt.predict([StudentFeatures(**student)])[0]
+    assert original.probabilidad == again.probabilidad
+
+
+def test_from_bytes_defaults_to_a_half_threshold_without_metadata(predictor):
+    """Metadata carries the calibrated threshold; without it, fall back to 0.5."""
+    bare = Predictor.from_bytes(Predictor.dump(predictor.pipeline))
+    assert bare.threshold == 0.5
+
+
+def test_from_bytes_rejects_a_corrupt_artifact():
+    with pytest.raises(Exception):  # noqa: B017 - joblib raises various unpickling errors
+        Predictor.from_bytes(b"not a joblib payload")

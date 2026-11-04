@@ -7,7 +7,10 @@ def test_health_reports_a_loaded_model(client):
     body = response.json()
     assert body["status"] == "healthy"
     assert body["model_loaded"] is True
-    assert body["database"] is None  # no DATABASE_URL in tests
+    # The database is required, so health always reports its state. Tests point at an
+    # unreachable one, so it reports a failed connection rather than None.
+    assert body["database"] is not None
+    assert body["database"]["connected"] is False
 
 
 def test_health_is_served_at_the_root(client):

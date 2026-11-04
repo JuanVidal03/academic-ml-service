@@ -52,12 +52,19 @@ def test_ml_domain_does_not_import_its_http_consumer():
     """)
 
 
-def test_ml_domain_does_not_import_fastapi():
-    """Keeps the model usable from a notebook or a batch job, not just from the API."""
+def test_ml_domain_does_not_import_fastapi_or_sqlalchemy():
+    """Keeps the model usable from a notebook or a batch job, not just from the API.
+
+    SQLAlchemy matters as much as FastAPI now that the artefact lives in the database:
+    ``Predictor.from_bytes`` takes bytes precisely so the database read can stay in
+    ``model_registry/service.py``.
+    """
     _assert_clean_import("""
         import sys
         import dropout_service.ml.predict  # noqa: F401
         import dropout_service.ml.schema  # noqa: F401
+        import dropout_service.ml.training.train  # noqa: F401
 
-        assert "fastapi" not in sys.modules, "ml domain pulled in fastapi"
+        for banned in ("fastapi", "sqlalchemy"):
+            assert banned not in sys.modules, f"ml domain pulled in {banned}"
     """)
