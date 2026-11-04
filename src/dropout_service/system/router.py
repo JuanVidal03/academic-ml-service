@@ -1,0 +1,69 @@
+"""Operational endpoints and deployed-model metadata.
+
+Two routers, because they belong at different URLs:
+
+* ``ops_router`` is mounted at the **root**. ``/health`` is an operational contract --
+  Railway's ``healthcheckPath`` points at it -- so it must never move behind a version
+  prefix.
+* ``meta_router`` is mounted under ``/api/v1`` alongside the business endpoints, because
+  clients call it to learn how to interpret a prediction.
+"""
+
+from fastapi import APIRouter, Request
+
+from dropout_service.database import check_connection
+from dropout_service.dependencies import PredictorDep
+from dropout_service.predictions.schemas import HealthResponse, ModelInfoResponse
+
+ops_router = APIRouter(tags=["ops"])
+meta_router = APIRouter(tags=["model"])
+
+
+@ops_router.get("/health", response_model=HealthResponse)
+async def health(request: Request) -> HealthResponse:
+    """Report liveness.
+
+    Returns 200 even when the model is missing, reporting ``status: "degraded"`` instead.
+    A missing model is a broken deployment that a restart cannot fix, so failing the health
+    check would only produce a crash loop and hide the reason; staying up lets an operator
+    read this endpoint and see exactly what is wrong.
+    """
+    engine = getattr(request.app.state, "engine", None)
+    predictor = getattr(request.app.state, "predictor", None)
+    return HealthResponse(
+        status="healthy" if predictor is not None else "degraded",
+        model_loaded=predictor is not None,
+        database=check_connection(engine) if engine is not None else None,
+    )
+
+
+@ops_router.get("/", include_in_schema=False)
+async def root() -> dict[str, str]:
+    return {
+        "service": "dropout-prediction-api",
+        "docs": "/docs",
+        "health": "/health",
+        "api": "/api/v1",
+    }
+
+
+@meta_router.get("/model/info", response_model=ModelInfoResponse)
+async def model_info(predictor: PredictorDep) -> ModelInfoResponse:
+    """Describe the model currently serving traffic."""
+    metadata = predictor.metadata
+    return ModelInfoResponse(
+        model_name=predictor.model_name,
+        model_version=predictor.model_version,
+        n_features=int(metadata.get("n_features", len(metadata.get("features", [])))),
+        features=list(metadata.get("features", [])),
+        decision_threshold=predictor.threshold,
+        risk_bands=metadata.get(
+            "risk_bands",
+            {
+                "bajo": [0.0, predictor.risk_medium],
+                "medio": [predictor.risk_medium, predictor.risk_high],
+                "alto": [predictor.risk_high, 1.0],
+            },
+        ),
+        test_metrics=metadata.get("test_metrics", {}),
+    )
