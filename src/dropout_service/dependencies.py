@@ -34,7 +34,11 @@ def get_predictor(request: Request) -> Predictor:
 
 
 def get_session_factory(request: Request) -> sessionmaker | None:
-    """Return the session factory, or None when the service runs without a database."""
+    """Return the session factory.
+
+    Still typed optional because startup tolerates an unreachable database: the attribute
+    is None only when the connection could not be established, which /health reports.
+    """
     return getattr(request.app.state, "session_factory", None)
 
 
@@ -44,7 +48,7 @@ def require_session(request: Request) -> Iterator[Session]:
     if factory is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="This endpoint requires a database. Set DATABASE_URL.",
+            detail="Database unavailable.",
         )
     with factory() as session:
         yield session

@@ -18,19 +18,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from dropout_service import __version__
 from dropout_service.config import Settings, configure_logging, get_settings
 from dropout_service.database import create_db_engine, create_session_factory
-from dropout_service.ml.predict import Predictor
-from dropout_service.router import API_V1_PREFIX, api_router
-from dropout_service.system.router import ops_router
+from dropout_service.model_registry.service import load_active
+from dropout_service.predictions.router import router as predictions_router
+from dropout_service.system.router import router as system_router
 
 logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
 Predicts academic dropout risk for university students.
 
-The model is trained offline from a historical dataset and loaded at startup. A PostgreSQL
-database is optional: without one, predictions still work but are not logged.
-
-Business endpoints live under `/api/v1`. `/health` is unprefixed, as an operational contract.
+The model is trained offline and stored in PostgreSQL; the service loads the active version
+at startup. A database is required.
 
 **Note:** these endpoints are currently unauthenticated. See `docs/WALKTHROUGH.md`.
 """
@@ -48,21 +46,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.session_factory = None
         app.state.predictor = None
 
+        # Startup stays tolerant of an unreachable database on purpose. The database is
+        # required, but crash-looping through a brief outage would hide the reason: /health
+        # reports it instead and the orchestrator decides what to do.
         try:
-            app.state.predictor = Predictor.from_disk(settings.model_path, settings.metrics_path)
-        except FileNotFoundError as exc:
-            logger.error("Starting without a model: %s", exc)
-
-        if settings.database_url:
-            try:
-                engine = create_db_engine(settings.database_url)
-                app.state.engine = engine
-                app.state.session_factory = create_session_factory(engine)
-                logger.info("Database configured")
-            except Exception:
-                logger.exception("Database setup failed; continuing without logging")
-        else:
-            logger.info("No DATABASE_URL set; predictions will not be logged")
+            engine = create_db_engine(settings.database_url)
+            app.state.engine = engine
+            app.state.session_factory = create_session_factory(engine)
+            with app.state.session_factory() as session:
+                app.state.predictor = load_active(session)
+        except Exception as exc:  # noqa: BLE001 - any failure here means degraded, not dead
+            logger.error(
+                "Could not load the active model, starting degraded: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            logger.debug("Model load failure detail", exc_info=True)
 
         yield
 
@@ -74,7 +73,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=DESCRIPTION,
         version=__version__,
         lifespan=lifespan,
-        openapi_url=f"{API_V1_PREFIX}/openapi.json",
     )
 
     app.add_middleware(
@@ -100,9 +98,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content={"detail": "Database unavailable."},
         )
 
-    # Ops endpoints at the root; everything else behind the version prefix.
-    app.include_router(ops_router)
-    app.include_router(api_router)
+    app.include_router(system_router)
+    app.include_router(predictions_router)
+    # When auth arrives, register its router here. A blanket requirement goes on the
+    # include_router call for the protected routers -- not on system_router, which carries
+    # /health and must stay reachable for the container's HEALTHCHECK.
     return app
 
 

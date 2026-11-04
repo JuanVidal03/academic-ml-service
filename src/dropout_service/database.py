@@ -28,7 +28,11 @@ class Base(DeclarativeBase):
 
 
 def create_db_engine(database_url: str) -> Engine:
-    """Create an engine that survives idle connection drops (Railway recycles these)."""
+    """Create an engine that survives idle connection drops.
+
+    Managed Postgres services and connection proxies close idle connections, so
+    ``pool_pre_ping`` and a recycle window keep the pool from handing out dead ones.
+    """
     return create_engine(database_url, pool_pre_ping=True, pool_recycle=1800)
 
 
