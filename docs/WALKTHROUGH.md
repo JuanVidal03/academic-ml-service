@@ -31,15 +31,14 @@ There are two separate flows. They share the preprocessing pipeline and nothing 
 OFFLINE (training) ─ run by a developer, seconds
   data/*.csv
     └─> ml/training/data.py:load_dataset ─> split_dataset
-          └─> ml/pipeline.py:build_pipeline
+          └─> ml/schema.py:build_pipeline
                 └─> ml/training/train.py:compare_models ─> tune_model
                       ─> select_threshold ─> evaluate
                       └─> train.py:save_model ─> models/model.joblib + metrics.json
 
 ONLINE (serving) ─ runs per HTTP request, milliseconds
-  HTTP POST /api/v1/predict
+  HTTP POST /predict
     └─> main.py            (app, CORS, error handlers)
-    └─> router.py          (/api/v1 prefix)
     └─> predictions/router.py:predict
           └─> ml/schema.py:StudentFeatures      (validate the request)
           └─> ml/predict.py:Predictor.predict   (reuses the SAME pipeline, now fitted)
@@ -49,7 +48,7 @@ ONLINE (serving) ─ runs per HTTP request, milliseconds
 ```
 
 The model is loaded **once** at startup, not per request. The arrow worth remembering is
-that both flows pass through `ml/pipeline.py`: that is what guarantees a student is
+that both flows pass through `ml/schema.py`: that is what guarantees a student is
 preprocessed identically whether they are a training row or a live request.
 
 ### How the code is organised
@@ -61,14 +60,13 @@ editing four shared files.
 ```
 src/dropout_service/
   main.py            create_app() + the ASGI app      <- uvicorn entrypoint
-  router.py          assembles the /api/v1 surface
-  config.py          Settings, configure_logging
+  config.py          Settings (all required, from .env), configure_logging
   database.py        engine, session factory, Base    (no table definitions)
   dependencies.py    shared Depends providers + Annotated aliases
 
   ml/                the model — a domain library, no HTTP, no FastAPI
-    schema.py        THE single source of truth: all 34 features, declared once
-    pipeline.py      imputation, encoding, scaling    (shared by both flows)
+    schema.py        THE single source of truth: the 34 features AND the
+                     preprocessing pipeline that transforms them
     predict.py       Predictor, PredictionResult      (serving)
     training/        offline only — never imported by the API
       data.py        load_dataset, split_dataset
@@ -82,7 +80,7 @@ src/dropout_service/
     service.py       log_predictions(), fetch_predictions_page()
 
   system/            ops + deployed-model metadata
-    router.py        /health and / (root), /model/info (under /api/v1)
+    router.py        /health, /, /model/info
 
   auth/              not created yet — the slot §10 fills
 ```
@@ -111,14 +109,17 @@ rather than a prediction.
 
 ### URL layout
 
-| Path | Why there |
-|---|---|
-| `/health`, `/` | Root, **unversioned**. `/health` is an operational contract: `railway.toml` points its healthcheck at it, so it must never move |
-| `/api/v1/predict`, `/api/v1/predict/batch`, `/api/v1/predictions`, `/api/v1/model/info` | The versioned business surface |
-| `/docs`, `/api/v1/openapi.json` | Interactive docs; the schema sits with the API it describes |
+Flat, unversioned. There will be no `v2`, so a prefix would be indirection that buys
+nothing; the two slice routers are included directly in `main.py`.
 
-The prefix is declared once, in `router.py:API_V1_PREFIX`. A future `v2` is a second
-`include_router`, not a search-and-replace.
+```
+GET  /health          GET  /model/info      POST /predict
+GET  /                GET  /predictions     POST /predict/batch
+GET  /docs            GET  /openapi.json
+```
+
+`/health` is the one path with an external contract: the container's `HEALTHCHECK` calls
+it.
 
 ## 2. Set up
 
@@ -136,8 +137,10 @@ cp .env.example .env
 2. `uv.lock` — exact pinned versions, so every machine gets the same build
 3. `.env.example` → `.env` — your local configuration
 
-Every setting has a working default, so an empty `.env` is fine. Nothing here needs a
-database.
+`cp .env.example .env` is **required**, not optional. The seven tuneable settings have no
+default in the code, so a missing one aborts startup with a `ValidationError` naming the
+field. `.env.example` ships the intended values, so copying it is enough. Only
+`DATABASE_URL` and `LOG_LEVEL` are optional.
 
 **Verify**
 
@@ -172,7 +175,7 @@ uv run scripts/analyze.py
 | 8 | `analysis.py:dropout_rate_by_category` | Dropout rate within each category level |
 | 9 | `analysis.py:numeric_correlations` | Pearson correlation with the target |
 | 10 | `analysis.py:mutual_information` | MI per feature (categoricals flagged discrete) |
-| 11 | `analysis.py:feature_importance` | Permutation importance via `ml/pipeline.py` |
+| 11 | `analysis.py:feature_importance` | Permutation importance via `ml/schema.py` |
 | 12 | `analysis.py:save_analysis` → `render_markdown` | Write `reports/analysis.{md,json}` |
 
 **Expect** a few seconds, and:
@@ -223,13 +226,13 @@ uv run scripts/train.py
 | 4 | `config.py:get_settings` | `test_size`, `cv_folds`, `random_state`, `target_recall` |
 | 5 | `ml/training/data.py:load_dataset` | Read CSV → `(X, y)`; raises on a corrupt target |
 | 6 | `ml/training/data.py:split_dataset` | Stratified 80/20 → 2,400 train / 600 test |
-| 7 | `train.py:compare_models` | For each of 5 algorithms: `_seeded` → `ml/pipeline.py:build_pipeline` → `cross_validate` with 4 scorers |
+| 7 | `train.py:compare_models` | For each of 5 algorithms: `_seeded` → `ml/schema.py:build_pipeline` → `cross_validate` with 4 scorers |
 | 8 | `train.py:tune_model` | `GridSearchCV` over `PARAM_GRIDS[winner]`, refits the best |
 | 9 | `train.py:select_threshold` | `cross_val_predict` out-of-fold → `precision_recall_curve` → highest threshold meeting `TARGET_RECALL` |
 | 10 | `train.py:evaluate` | Test-set metrics **at that threshold** |
 | 11 | `train.py:save_model` | `joblib.dump` the pipeline + write `metrics.json` |
 
-Inside step 7, `ml/pipeline.py:build_pipeline` → `build_preprocessor` assembles:
+Inside step 7, `ml/schema.py:build_pipeline` → `build_preprocessor` assembles:
 
 - categorical: `coerce_missing_to_nan` → `SimpleImputer(constant, "Unknown")` → `OneHotEncoder`
 - numeric: `SimpleImputer(median)` → `StandardScaler`
@@ -275,7 +278,7 @@ until step 10.
 recall from 0.58 to 0.79 is the entire point of calibrating it.
 
 **The artefact is coupled to the package path.** `model.joblib` is a pickle, and it stores
-`ml/pipeline.py:coerce_missing_to_nan` by its *import path*. Renaming or moving the package
+`ml/schema.py:coerce_missing_to_nan` by its *import path*. Renaming or moving the package
 therefore makes every previously trained model unloadable with
 `ModuleNotFoundError`. Retraining is the fix (it is deterministic and takes seconds), but
 in production this means a release that moves Python modules must ship a freshly trained
@@ -303,8 +306,8 @@ uv run uvicorn dropout_service.main:app --reload --port 8000
 | 6 | `database.py:create_db_engine` / `create_session_factory` | Only if `DATABASE_URL` is set |
 | 7 | `CORSMiddleware` | Restrict browser origins to `CORS_ORIGINS` |
 | 8 | `main.py` exception handler | Map `SQLAlchemyError` → 503 |
-| 9 | `system/router.py:ops_router` | Mount `/health` and `/` at the root |
-| 10 | `router.py:api_router` | Mount the slices under `/api/v1` |
+| 9 | `system/router.py:router` | Mount `/health`, `/` and `/model/info` |
+| 10 | `predictions/router.py:router` | Mount the prediction endpoints |
 
 Resources land on `app.state` and reach routes through `dependencies.py`. If the model file
 is missing, startup logs an error and continues — `/health` then reports `degraded` and
@@ -317,7 +320,7 @@ curl -s localhost:8000/health
 # {"status":"healthy","model_loaded":true,"database":null}
 
 curl -s localhost:8000/
-# {"service":"dropout-prediction-api","docs":"/docs","health":"/health","api":"/api/v1"}
+# {"service":"dropout-prediction-api","docs":"/docs","health":"/health"}
 ```
 
 `"database": null` simply means no `DATABASE_URL` is configured. Then open
@@ -331,13 +334,13 @@ What happens on `POST /predict`, in order.
 
 | # | File : function | What it does |
 |---|---|---|
-| 1 | `router.py:api_router` | Match `/api/v1/predict` |
+| 1 | `predictions/router.py` | Match `/predict` |
 | 2 | `ml/schema.py:StudentFeatures` | Validate the body: ranges, closed vocabularies, no unknown fields. Invalid → `422`, and the handler never runs |
 | 3 | `dependencies.py:get_predictor` | Hand over the in-memory `Predictor`; `503` if absent |
 | 4 | `dependencies.py:get_session_factory` | Session factory, or `None` without a database |
 | 5 | `predictions/router.py:predict` | The handler — plumbing only |
 | 6 | `ml/predict.py:Predictor.predict` | Build a one-row DataFrame, `reindex` to `ALL_FEATURES` order |
-| 7 | `ml/pipeline.py` steps (fitted) | `coerce_missing_to_nan` → impute → encode → scale |
+| 7 | `ml/schema.py` steps (fitted) | `coerce_missing_to_nan` → impute → encode → scale |
 | 8 | sklearn estimator | `predict_proba` → dropout probability |
 | 9 | `ml/predict.py:Predictor.risk_level` | Band it: `bajo` / `medio` / `alto` |
 | 10 | `ml/predict.py:PredictionResult` | Serialise `{deserta, probabilidad, riesgo}` |
@@ -348,7 +351,7 @@ and a logging failure is recorded in the logs but never fails the request — th
 already succeeded. It lives in `service.py` rather than the router so it can be tested
 without an HTTP request (`tests/predictions/test_service.py`).
 
-`POST /api/v1/predict/batch` is the same path with a list. `Predictor.predict` always takes
+`POST /predict/batch` is the same path with a list. `Predictor.predict` always takes
 a list; a single prediction is `predict([student])[0]`, so single and batch requests cannot
 diverge in behaviour.
 
@@ -371,7 +374,7 @@ cat > /tmp/student.json <<'JSON'
 "satisfaccion_con_programa":4,"participacion_extracurricular":"No","uso_tutorias":"Si"}
 JSON
 
-curl -s -X POST localhost:8000/api/v1/predict \
+curl -s -X POST localhost:8000/predict \
   -H 'Content-Type: application/json' -d @/tmp/student.json
 ```
 
@@ -384,7 +387,7 @@ Expected, exactly:
 Now check the model responds to the signal — drop the grades and attendance:
 
 ```bash
-curl -s -X POST localhost:8000/api/v1/predict -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' \
   -d "$(python3 -c "
 import json; d=json.load(open('/tmp/student.json'))
 d.update(nota_promedio=1.3, porcentaje_asistencia=42.0, promedio_acumulado=1.5,
@@ -406,8 +409,8 @@ import json; d=json.load(open('/tmp/student.json')); d.pop('area_materia_critica
 json.dump(d, open('/tmp/omitted.json','w'))
 d['area_materia_critica']=None; json.dump(d, open('/tmp/null.json','w'))"
 
-curl -s -X POST localhost:8000/api/v1/predict -H 'Content-Type: application/json' -d @/tmp/omitted.json
-curl -s -X POST localhost:8000/api/v1/predict -H 'Content-Type: application/json' -d @/tmp/null.json
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' -d @/tmp/omitted.json
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' -d @/tmp/null.json
 ```
 
 Both must print `0.2186075960472946`. If they differ, the train/serve contract is broken.
@@ -416,7 +419,7 @@ And a stale `"N/A"` — the value an older version of this API defaulted to — 
 *rejected* rather than silently mis-encoded:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/api/v1/predict \
+curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/predict \
   -H 'Content-Type: application/json' \
   -d "$(python3 -c "
 import json; d=json.load(open('/tmp/student.json'))
@@ -428,11 +431,11 @@ d['area_materia_critica']='N/A'; print(json.dumps(d))")"
 
 ```bash
 curl -s localhost:8000/health
-curl -s localhost:8000/api/v1/model/info | python3 -m json.tool | head -20
-curl -s -X POST localhost:8000/api/v1/predict -H 'Content-Type: application/json' -d @/tmp/student.json
-curl -s -X POST localhost:8000/api/v1/predict/batch -H 'Content-Type: application/json' \
+curl -s localhost:8000/model/info | python3 -m json.tool | head -20
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' -d @/tmp/student.json
+curl -s -X POST localhost:8000/predict/batch -H 'Content-Type: application/json' \
   -d "{\"students\":[$(cat /tmp/student.json),$(cat /tmp/student.json)]}"
-curl -s localhost:8000/api/v1/predictions            # 503 without a database
+curl -s localhost:8000/predictions            # 503 without a database
 ```
 
 Expected failure modes:
@@ -444,10 +447,9 @@ Expected failure modes:
 | `{"inventado": 1}` added | 422 | Unknown fields are rejected |
 | `nota_promedio` omitted | 422 | Required |
 | 101 students in a batch | 422 | Cap is 100 |
-| `/api/v1/predictions` with no DB | 503 | Needs PostgreSQL |
-| `/api/v1/predictions` with an unreachable DB | 503 | Mapped from `SQLAlchemyError` in `main.py`, so it is never an opaque 500 |
-| `POST /predict` (no prefix) | 404 | Business endpoints live under `/api/v1` only |
-| `POST /api/v1/records` | 404 | Removed — training data comes from the CSV |
+| `/predictions` with no DB | 503 | Needs PostgreSQL |
+| `/predictions` with an unreachable DB | 503 | Mapped from `SQLAlchemyError` in `main.py`, so it is never an opaque 500 |
+| `POST /records` | 404 | Removed — training data comes from the CSV |
 
 ---
 
@@ -475,7 +477,7 @@ uv run pytest -v
 | File | Covers |
 |---|---|
 | `tests/ml/test_schema.py` | Feature lists match the contract; invalid input rejected |
-| `tests/ml/test_pipeline.py` | **Imputation fit on train rows only (leakage guard)**; `None` ≡ `NaN` |
+| `tests/ml/test_preprocessing.py` | **Imputation fit on train rows only (leakage guard)**; `None` ≡ `NaN` |
 | `tests/ml/test_no_train_serve_skew.py` | **Serving reproduces training exactly** |
 | `tests/ml/test_predict.py` | Probability bounds, determinism, threshold, risk bands |
 | `tests/ml/training/test_data.py` | Loading, target mapping, excluded columns, split properties |
@@ -485,12 +487,12 @@ uv run pytest -v
 | `tests/system/test_router.py` | `/health` stays unprefixed, `/model/info`, OpenAPI |
 | `tests/test_layering.py` | **The dependency arrows in §1 actually hold** |
 | `tests/test_error_handling.py` | An unreachable database → 503, not 500 |
-| `tests/test_config.py` | `DATABASE_URL` normalisation; derived paths; version metadata |
+| `tests/test_config.py` | `DATABASE_URL` normalisation; derived paths; version metadata; **the seven settings have no code-side default** |
 
 Each test directory needs an `__init__.py`: `tests/__init__.py` exists, and two modules
 share the basename `test_router.py`, which pytest would otherwise reject as a duplicate.
 
-**Expect** `78 passed` in about seven seconds.
+**Expect** `79 passed` in about seven seconds.
 
 The suite trains a real model, so assertions are about real behaviour. The previous suite
 asserted `status_code in [200, 503]`, which passed whether the service worked or not; those
@@ -500,20 +502,20 @@ are gone.
 evidence of anything:
 
 Reintroduce the original bug by deleting the `normalise` step from
-`pipeline.py:build_preprocessor` — the step that maps a served `None` onto the `NaN` the
+`ml/schema.py:build_preprocessor` — the step that maps a served `None` onto the `NaN` the
 imputer recognises:
 
 ```bash
-cp src/dropout_service/ml/pipeline.py /tmp/pipeline.bak
+cp src/dropout_service/ml/schema.py /tmp/pipeline.bak
 # delete the ("normalise", FunctionTransformer(...)) tuple from build_preprocessor
-$EDITOR src/dropout_service/ml/pipeline.py
+$EDITOR src/dropout_service/ml/schema.py
 
 uv run pytest tests/ml/test_no_train_serve_skew.py -q
 # FAILED test_omitted_category_matches_the_value_used_at_training_time
 # FAILED test_an_unseen_category_would_have_produced_a_different_answer
 
-cp /tmp/pipeline.bak src/dropout_service/ml/pipeline.py
-uv run pytest -q          # 78 passed again
+cp /tmp/pipeline.bak src/dropout_service/ml/schema.py
+uv run pytest -q          # 79 passed again
 ```
 
 The layering tests can be checked the same way — add
@@ -581,12 +583,12 @@ migration.
 psql "$DATABASE_URL" -c "\d ml.predictions"
 
 # Make a prediction, then confirm it was logged
-curl -s -o /dev/null -X POST localhost:8000/api/v1/predict \
+curl -s -o /dev/null -X POST localhost:8000/predict \
   -H 'Content-Type: application/json' -d @/tmp/student.json
 sleep 1
 psql "$DATABASE_URL" -c "select id, risk_level, round(probability::numeric,4), created_at
                          from ml.predictions order by id desc limit 5;"
-curl -s 'localhost:8000/api/v1/predictions?page=1&page_size=5' | python3 -m json.tool
+curl -s 'localhost:8000/predictions?page=1&page_size=5' | python3 -m json.tool
 ```
 
 Confirm the metadata registration is intact — the check that protects the audit log:
@@ -604,13 +606,13 @@ The database must remain **optional**. Confirm the service still works without i
 
 ```bash
 unset DATABASE_URL
-uv run uvicorn dropout_service.main:app --port 8000   # /api/v1/predict still returns 200
+uv run uvicorn dropout_service.main:app --port 8000   # /predict still returns 200
 ```
 
 A bare `postgresql://` URL is rewritten to `postgresql+psycopg://` by
 `config.py:Settings._use_psycopg3_driver`, because SQLAlchemy maps the bare scheme to
-psycopg2 — which this project does not install. Railway injects exactly that bare form, so
-without the rewrite prediction logging would silently never work in production.
+psycopg2 — which this project does not install. Hosted providers emit exactly that bare
+form, so without the rewrite prediction logging would silently never work in production.
 
 ---
 
@@ -619,8 +621,8 @@ without the rewrite prediction logging would silently never work in production.
 **Commands**
 
 ```bash
-docker build -t dropout-ml .
-docker run -p 8000:8000 -e DATABASE_URL="$DATABASE_URL" dropout-ml
+docker build -t dropout-service:1.0.0 .
+docker run -p 8000:8000 --env-file .env dropout-service:1.0.0
 ```
 
 **File sequence**
@@ -631,8 +633,8 @@ docker run -p 8000:8000 -e DATABASE_URL="$DATABASE_URL" dropout-ml
 2. `Dockerfile` build stage — `uv sync --frozen --no-dev` against `uv.lock`
 3. `Dockerfile` runtime stage — copies `.venv`, `src`, `models`, `alembic`; creates `appuser`
 4. `CMD` — `uvicorn dropout_service.main:app --port ${PORT:-8000}`
-5. `railway.toml` — builder, `/health` healthcheck, restart policy. **Unchanged by the
-   `/api/v1` move**, precisely because `/health` stayed at the root
+5. `HEALTHCHECK` in the Dockerfile — the only health probe; there is no
+   platform-specific config file
 
 The image ships `models/` but not `data/`: training is offline, so the container carries only
 what it serves. Commit `models/model.joblib` or build it in CI — and remember from §4 that
@@ -641,15 +643,29 @@ the artefact must be retrained whenever Python modules move.
 **Verify**
 
 ```bash
-docker run -d -p 8000:8000 --name dropout-test dropout-ml
+docker run -d -p 8000:8000 --env-file .env --name dropout-test dropout-service:1.0.0
 sleep 5
 curl -s localhost:8000/health
 docker exec dropout-test ls /app/data 2>&1   # must NOT exist
 docker stop dropout-test && docker rm dropout-test
+
+# And confirm the config really is required: no --env-file means no start.
+docker run --rm dropout-service:1.0.0 2>&1 | tail -3   # ValidationError
 ```
 
-On Railway: set `DATABASE_URL` and `CORS_ORIGINS`, run `alembic upgrade head` as a release
-step, and deploy. `/health` is already wired as the healthcheck.
+Push the image to any registry and run it wherever you like — there is no
+platform-specific configuration:
+
+```bash
+docker tag dropout-service:1.0.0 <registry>/dropout-service:1.0.0
+docker push <registry>/dropout-service:1.0.0
+```
+
+Two things the host must do: supply the required settings at run time (`--env-file`, or the
+platform's own secret mechanism — never baked into the image, which would recreate the
+defaults the config removed), and run `alembic upgrade head` before the new version serves
+traffic if you use the database. The container's own `HEALTHCHECK` already probes
+`/health`.
 
 ---
 
@@ -678,21 +694,21 @@ src/dropout_service/auth/
 | Piece | Approach |
 |---|---|
 | Storage | `users` table (email, bcrypt hash, role) in `auth/models.py` + a new migration |
-| Login | `POST /api/v1/auth/login` → short-lived JWT; `GET /api/v1/auth/me` |
+| Login | `POST /auth/login` → short-lived JWT; `GET /auth/me` |
 | Hashing | `bcrypt` (via `passlib`), never a bare SHA |
 | Verification | `get_current_user` in `auth/service.py`, exposed as `CurrentUserDep` in `dependencies.py` |
-| Protected | `/api/v1/predict`, `/api/v1/predict/batch`, `/api/v1/predictions` |
-| Open | `/health` and `/` only — the root-mounted `ops_router` |
+| Protected | `/predict`, `/predict/batch`, `/predictions` |
+| Open | `/health` and `/` only — the `system` router |
 
 Three wiring points, each already marked with a comment in the code:
 
-1. `router.py` — `api_router.include_router(auth_router)`
+1. `main.py` — `app.include_router(auth_router)`
 2. `dependencies.py` — add `CurrentUserDep`, mirroring the existing `Annotated` aliases
 3. `alembic/env.py` — import `auth.models` so the users table reaches `Base.metadata`
 
-Because `/health` sits on a separate root-mounted router, protecting everything else is a
-single `dependencies=[Depends(get_current_user)]` on `api_router` — the healthcheck cannot
-be locked out by accident.
+Put the blanket requirement on the `include_router` call for the protected routers, not on
+`system_router` — that one carries `/health`, which the container's `HEALTHCHECK` needs to
+reach unauthenticated.
 
 Worth deciding at the same time: who may read `/predictions`. A per-student risk history is
 sensitive, and advisers, administrators and researchers do not need the same access — hence
@@ -716,8 +732,8 @@ known frontend origins.
 | 422 on a seemingly valid body | Closed vocabulary, or an unknown field | Read `detail`; check `/docs` |
 | 422 on `area_materia_critica` | Sending `"N/A"` or `"Unknown"` | Omit the field or send `null` |
 | `ModuleNotFoundError: dropout_service` | Package not installed | `uv sync` (installs the project itself) |
-| `ModuleNotFoundError: No module named 'dropout_ml'` **when loading the model** | `model.joblib` was trained before the package was renamed; the pickle stores module paths | `uv run scripts/train.py` to rebuild the artefact |
-| 404 on `/predict` or `/predictions` | Missing the version prefix | Use `/api/v1/predict`; only `/health` and `/` sit at the root |
+| `ModuleNotFoundError` naming a module **when loading the model** | `model.joblib` was trained before a module moved; the pickle stores import paths | `uv run scripts/train.py` to rebuild the artefact |
+| `ValidationError` naming settings at startup | No `.env`, or a key missing from it | `cp .env.example .env`; in Docker pass `--env-file .env` |
 | 500 from a database endpoint | Should not happen — `SQLAlchemyError` is mapped to 503 | Check the logs; if it is genuinely a 500, the handler in `main.py` was bypassed |
 | CORS error in the browser | Origin not allowed | Add it to `CORS_ORIGINS` |
 | Predictions all look similar | Model is weak by nature (AUC 0.77) | Expected; use ranking, not absolutes |
@@ -750,8 +766,16 @@ field escapes.
 
 ### Anything that learns from data lives inside the pipeline
 
-Imputation, encoding and scaling are all steps in `ml/pipeline.py`, never in
+Imputation, encoding and scaling are all steps built in `ml/schema.py`, never in
 `ml/training/data.py`.
+
+They live in `schema.py` rather than a module of their own because the two halves belong
+together — the feature declaration says *what* the model consumes, the pipeline says *how*
+each one is transformed, and they have to agree. There is also a hard constraint on where
+the preprocessing may live at all: the pickled model references `coerce_missing_to_nan` by
+import path and the serving path unpickles it, so the function must sit in a module the API
+can import by itself. Putting it under `ml/training/` would make loading a model drag the
+training code into the API and break the rule below.
 
 Two reasons. First, **no leakage**: the old `clean_data` computed medians over the whole
 dataset before splitting, so every cross-validation fold saw statistics drawn partly from
@@ -765,7 +789,7 @@ That second property needed care. `SimpleImputer` only treats `np.nan` as missin
 two entry points spell "absent" differently — `pd.read_csv` yields `NaN`, a Pydantic optional
 field yields `None`. A served `None` therefore slipped past the imputer and reached the
 encoder as an unseen category: the original bug, reborn. Hence
-`ml/pipeline.py:coerce_missing_to_nan`, which normalises both to `NaN` inside the shared
+`ml/schema.py:coerce_missing_to_nan`, which normalises both to `NaN` inside the shared
 pipeline rather than patching it at the serving edge.
 
 ### The threshold is calibrated, and calibrated on the right data
@@ -802,7 +826,7 @@ The dependency arrows are not a convention, they are tested
   a web framework installed.
 
 A related consequence worth knowing: `model.joblib` pickles
-`ml/pipeline.py:coerce_missing_to_nan` by import path, so moving Python modules invalidates
+`ml/schema.py:coerce_missing_to_nan` by import path, so moving Python modules invalidates
 every previously trained artefact. That is why this restructure retrained the model, and
 why a production release that moves modules must ship a fresh one.
 

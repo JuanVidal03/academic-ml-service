@@ -108,7 +108,7 @@ Run `uv run scripts/analyze.py` to regenerate the full report.
 ```bash
 cd ml-service
 uv sync
-cp .env.example .env     # every value is optional; defaults work
+cp .env.example .env     # required: the service will not start without it
 ```
 
 ### Train
@@ -147,29 +147,26 @@ uv run alembic upgrade head
 ```
 
 A bare `postgresql://` URL is rewritten to `postgresql+psycopg://` automatically, so a URL
-copied from Railway or Heroku works unchanged.
+copied from a hosted provider works unchanged.
 
 ---
 
 ## API
 
-Business endpoints live under `/api/v1`. `/health` is deliberately unversioned: it is an
-operational contract that Railway's healthcheck points at, so it must never move.
-
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/health` | Liveness and readiness (used by Railway) |
+| GET | `/health` | Liveness and readiness; the container's `HEALTHCHECK` calls it |
 | GET | `/` | Service banner |
-| GET | `/api/v1/model/info` | Model metadata, threshold and test metrics |
-| POST | `/api/v1/predict` | Assess one student |
-| POST | `/api/v1/predict/batch` | Assess up to 100 students |
-| GET | `/api/v1/predictions` | Paginated audit log (requires a database) |
+| GET | `/model/info` | Model metadata, threshold and test metrics |
+| POST | `/predict` | Assess one student |
+| POST | `/predict/batch` | Assess up to 100 students |
+| GET | `/predictions` | Paginated audit log (requires a database) |
 | GET | `/docs` | Interactive OpenAPI documentation |
 
 ### Example
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/predict \
+curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
   -d '{
     "semestre": 3,
@@ -240,28 +237,48 @@ All 34 features are declared once, in `src/dropout_service/ml/schema.py`. Notes:
 
 ## Configuration
 
-Every variable is optional. See `.env.example` for the full annotated list.
+Configuration comes from `.env` only. The seven required variables have **no default in
+the code**, so a missing one aborts startup with a `ValidationError` naming the field —
+deliberate, since each one changes either who may call the API or which model gets trained.
+See `.env.example` for the annotated list.
 
-| Variable | Default | Purpose |
+| Variable | Required | Purpose |
 |---|---|---|
-| `DATABASE_URL` | unset | PostgreSQL connection. Unset = no prediction logging |
-| `CORS_ORIGINS` | localhost:3000, :5173 | Browser origins allowed to call the API |
-| `LOG_LEVEL` | `INFO` | Logging verbosity |
-| `TARGET_RECALL` | `0.80` | Recall the decision threshold must reach |
-| `RISK_THRESHOLD_MEDIUM` | `0.30` | Lower bound of the `medio` band |
-| `RISK_THRESHOLD_HIGH` | `0.60` | Lower bound of the `alto` band |
-| `TEST_SIZE` | `0.2` | Held-out fraction |
-| `CV_FOLDS` | `5` | Cross-validation folds |
-| `RANDOM_STATE` | `42` | Seed, for reproducibility |
+| `CORS_ORIGINS` | **yes** | Browser origins allowed to call the API |
+| `TEST_SIZE` | **yes** | Held-out fraction |
+| `CV_FOLDS` | **yes** | Cross-validation folds |
+| `RANDOM_STATE` | **yes** | Seed, for reproducibility |
+| `TARGET_RECALL` | **yes** | Recall the decision threshold must reach |
+| `RISK_THRESHOLD_MEDIUM` | **yes** | Lower bound of the `medio` band |
+| `RISK_THRESHOLD_HIGH` | **yes** | Lower bound of the `alto` band |
+| `DATABASE_URL` | no | PostgreSQL connection. Unset = no prediction logging |
+| `LOG_LEVEL` | no (`INFO`) | Logging verbosity |
 
 Never set `CORS_ORIGINS` to `*`: the API is called with credentials.
+
+### Deploy
+
+Build an image and run it anywhere; there is no platform-specific configuration.
+
+```bash
+docker build -t dropout-service:1.0.0 .
+docker run -p 8000:8000 --env-file .env dropout-service:1.0.0
+
+# push to any registry
+docker tag dropout-service:1.0.0 <registry>/dropout-service:1.0.0
+docker push <registry>/dropout-service:1.0.0
+```
+
+The image carries the trained model but not `data/`. Run `alembic upgrade head` before
+starting a new version if you use the database. Required settings are supplied at run time
+(`--env-file`), never baked into the image.
 
 ---
 
 ## Development
 
 ```bash
-uv run pytest -v            # 78 tests
+uv run pytest -v            # 79 tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
@@ -276,10 +293,11 @@ which silently corrupted predictions for half the student population.
 `tests/ml/test_schema.py` fails if a field ever escapes the derivation.
 
 **2. Anything that learns from data belongs inside the pipeline.** Imputation, scaling and
-encoding all live in `ml/pipeline.py`, so scikit-learn refits them per cross-validation fold
-and training and serving share one code path. Imputing in `ml/training/data.py` would leak
-test-set statistics into every fold and let the two paths diverge.
-`tests/ml/test_pipeline.py` and `tests/ml/test_no_train_serve_skew.py` guard both properties.
+encoding are built in `ml/schema.py` alongside the feature contract, so scikit-learn refits
+them per cross-validation fold and training and serving share one code path. Imputing in
+`ml/training/data.py` would leak test-set statistics into every fold and let the two paths
+diverge. `tests/ml/test_preprocessing.py` and `tests/ml/test_no_train_serve_skew.py` guard
+both properties.
 
 **3. The dependency arrows are tested, not just intended.** The serving path must never
 import `ml/training/` — those modules read the CSV, which is excluded from the Docker image,
@@ -287,10 +305,11 @@ so an accidental import would pass every local test and fail only in production.
 must never import FastAPI or the HTTP slices, so the model stays usable from a notebook or
 a batch job. `tests/test_layering.py` enforces both.
 
-A consequence worth knowing: `model.joblib` pickles a function from `ml/pipeline.py` by
+A consequence worth knowing: `model.joblib` pickles a function from `ml/schema.py` by
 import path, so **moving Python modules invalidates every previously trained model** with
 `ModuleNotFoundError`. Retrain after any such refactor — it is deterministic and takes
-seconds.
+seconds. It is also why the preprocessing lives in `ml/schema.py` and not under
+`ml/training/`: loading a model must not drag training code into the API.
 
 ---
 
