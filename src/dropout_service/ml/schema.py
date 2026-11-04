@@ -1,6 +1,13 @@
 from typing import Literal, get_args, get_origin
 
+import numpy as np
+import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
+from sklearn.base import BaseEstimator
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
 Genero = Literal["F", "M", "Otro"]
 Modalidad = Literal["Diurna", "Nocturna"]
@@ -164,3 +171,57 @@ TARGET_MAP = {"Si": 1, "No": 0}
 #: Fill value for a missing categorical. Used by the pipeline at *both* training and
 #: serving time, so the two can never disagree.
 CATEGORICAL_FILL = "Unknown"
+
+
+def coerce_missing_to_nan(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalise every spelling of "absent" to ``np.nan``.
+
+    ``pd.read_csv`` yields ``NaN`` when training; a Pydantic optional field yields ``None``
+    when serving. ``SimpleImputer`` only treats ``np.nan`` as missing, so without this a
+    served ``None`` reaches the encoder as an unseen category and ``handle_unknown="ignore"``
+    silently turns it into an all-zero row -- wrong predictions, no error.
+
+    Two constraints on where this lives: the pickled model references it by import path, so
+    moving it invalidates every trained artefact; and it must stay importable by the serving
+    path alone, so it cannot go under ``ml/training/``.
+    """
+    normalised = pd.DataFrame(frame).astype(object)
+    return normalised.where(normalised.notna(), np.nan)
+
+
+def build_preprocessor() -> ColumnTransformer:
+    """Categorical: sentinel-fill then one-hot. Numeric: median-impute then standardise.
+
+    Every step that learns from data lives in here so scikit-learn refits it per
+    cross-validation fold -- imputation statistics come from training rows only. Computing
+    medians before the split leaks test-set information into every fold.
+    """
+    categorical = Pipeline(
+        [
+            (
+                "normalise",
+                FunctionTransformer(coerce_missing_to_nan, feature_names_out="one-to-one"),
+            ),
+            ("impute", SimpleImputer(strategy="constant", fill_value=CATEGORICAL_FILL)),
+            ("encode", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+        ]
+    )
+    numeric = Pipeline(
+        [
+            # Refit per fold by cross-validation, so no test statistics leak in.
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+        ]
+    )
+    return ColumnTransformer(
+        transformers=[
+            ("cat", categorical, CATEGORICAL_FEATURES),
+            ("num", numeric, NUMERIC_FEATURES),
+        ],
+        remainder="drop",
+    )
+
+
+def build_pipeline(estimator: BaseEstimator) -> Pipeline:
+    """Wrap ``estimator`` behind the shared preprocessor."""
+    return Pipeline([("preprocessor", build_preprocessor()), ("classifier", estimator)])

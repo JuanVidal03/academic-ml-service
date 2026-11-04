@@ -1,8 +1,7 @@
 """Loading a trained model and producing predictions."""
 
-import json
+import io
 import logging
-from pathlib import Path
 from typing import Any, Literal, Self
 
 import joblib
@@ -30,7 +29,11 @@ class Predictor:
     """A fitted pipeline plus the metadata needed to interpret its output.
 
     Holds everything in memory, so a prediction touches neither the filesystem nor the
-    database. Construct once per process via :meth:`from_disk` and reuse it.
+    database. Construct once per process via :meth:`from_bytes` and reuse it.
+
+    Deliberately knows nothing about where the artefact came from: it takes bytes and a
+    metadata dict. The database read lives in ``model_registry/service.py``, which keeps
+    this module free of SQLAlchemy and so usable from a notebook or a batch job.
     """
 
     def __init__(
@@ -40,6 +43,7 @@ class Predictor:
         threshold: float | None = None,
         risk_medium: float | None = None,
         risk_high: float | None = None,
+        model_version_id: int | None = None,
     ) -> None:
         settings = get_settings()
         self.pipeline = pipeline
@@ -53,31 +57,26 @@ class Predictor:
             risk_medium if risk_medium is not None else settings.risk_threshold_medium
         )
         self.risk_high = risk_high if risk_high is not None else settings.risk_threshold_high
+        #: Primary key of the model_versions row this came from, so an audit entry can
+        #: point at the exact model. None when the predictor was built directly from bytes.
+        self.model_version_id = model_version_id
 
     @classmethod
-    def from_disk(cls, model_path: Path | None = None, metrics_path: Path | None = None) -> Self:
-        """Load a pipeline and its metadata from disk.
+    def from_bytes(
+        cls,
+        artifact: bytes,
+        metadata: dict[str, Any] | None = None,
+        model_version_id: int | None = None,
+    ) -> Self:
+        """Reconstruct a predictor from a joblib-serialised pipeline.
 
-        Raises:
-            FileNotFoundError: if the model file does not exist.
+        ``artifact`` is exactly what ``joblib.dump`` produced, so the pipeline comes back
+        identical -- including the fitted encoders and the ``FunctionTransformer`` that
+        references ``ml/schema.py:coerce_missing_to_nan`` by import path.
         """
-        settings = get_settings()
-        model_path = model_path or settings.model_path
-        metrics_path = metrics_path or settings.metrics_path
-
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"No model at {model_path}. Train one first: uv run scripts/train.py"
-            )
-
-        pipeline = joblib.load(model_path)
-        metadata: dict[str, Any] = {}
-        if metrics_path.exists():
-            metadata = json.loads(metrics_path.read_text())
-        else:
-            logger.warning("No metrics at %s; falling back to a 0.50 threshold", metrics_path)
-
-        predictor = cls(pipeline=pipeline, metadata=metadata)
+        pipeline = joblib.load(io.BytesIO(artifact))
+        metadata = metadata or {}
+        predictor = cls(pipeline=pipeline, metadata=metadata, model_version_id=model_version_id)
         logger.info(
             "Loaded %s (version %s, threshold %.4f)",
             metadata.get("model_name", "model"),
@@ -85,6 +84,13 @@ class Predictor:
             predictor.threshold,
         )
         return predictor
+
+    @staticmethod
+    def dump(pipeline: Pipeline) -> bytes:
+        """Serialise a fitted pipeline to bytes, ready for a BYTEA column."""
+        buffer = io.BytesIO()
+        joblib.dump(pipeline, buffer)
+        return buffer.getvalue()
 
     @property
     def model_name(self) -> str:
