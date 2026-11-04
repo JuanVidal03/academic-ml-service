@@ -1,13 +1,4 @@
-"""Operational endpoints and deployed-model metadata.
-
-Two routers, because they belong at different URLs:
-
-* ``ops_router`` is mounted at the **root**. ``/health`` is an operational contract --
-  Railway's ``healthcheckPath`` points at it -- so it must never move behind a version
-  prefix.
-* ``meta_router`` is mounted under ``/api/v1`` alongside the business endpoints, because
-  clients call it to learn how to interpret a prediction.
-"""
+"""Operational endpoints and deployed-model metadata."""
 
 from fastapi import APIRouter, Request
 
@@ -15,18 +6,17 @@ from dropout_service.database import check_connection
 from dropout_service.dependencies import PredictorDep
 from dropout_service.predictions.schemas import HealthResponse, ModelInfoResponse
 
-ops_router = APIRouter(tags=["ops"])
-meta_router = APIRouter(tags=["model"])
+router = APIRouter(tags=["system"])
 
 
-@ops_router.get("/health", response_model=HealthResponse)
+@router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
     """Report liveness.
 
-    Returns 200 even when the model is missing, reporting ``status: "degraded"`` instead.
-    A missing model is a broken deployment that a restart cannot fix, so failing the health
-    check would only produce a crash loop and hide the reason; staying up lets an operator
-    read this endpoint and see exactly what is wrong.
+    The container's ``HEALTHCHECK`` calls this. It returns 200 even when the model is
+    missing, reporting ``status: "degraded"`` instead: a missing model is a broken
+    deployment that a restart cannot fix, so failing the health check would only produce a
+    crash loop and hide the reason. Staying up lets an operator read this and see why.
     """
     engine = getattr(request.app.state, "engine", None)
     predictor = getattr(request.app.state, "predictor", None)
@@ -37,17 +27,12 @@ async def health(request: Request) -> HealthResponse:
     )
 
 
-@ops_router.get("/", include_in_schema=False)
+@router.get("/", include_in_schema=False)
 async def root() -> dict[str, str]:
-    return {
-        "service": "dropout-prediction-api",
-        "docs": "/docs",
-        "health": "/health",
-        "api": "/api/v1",
-    }
+    return {"service": "dropout-prediction-api", "docs": "/docs", "health": "/health"}
 
 
-@meta_router.get("/model/info", response_model=ModelInfoResponse)
+@router.get("/model/info", response_model=ModelInfoResponse)
 async def model_info(predictor: PredictorDep) -> ModelInfoResponse:
     """Describe the model currently serving traffic."""
     metadata = predictor.metadata
