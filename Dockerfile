@@ -26,12 +26,11 @@ WORKDIR /app
 
 RUN useradd --create-home --shell /bin/bash appuser
 
-# The virtual environment, the source, and the trained model. Training data is
-# deliberately excluded: training is an offline step, so the image carries only the
-# artefact it needs to serve, which also keeps it immutable and small.
+# The virtual environment and the source. Neither the training data nor a model is
+# baked in: the model is read from the database at startup, so one image works against
+# any environment.
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/src /app/src
-COPY --from=builder --chown=appuser:appuser /app/models /app/models
 # Migrations, so a release step can run `alembic upgrade head`.
 COPY --from=builder --chown=appuser:appuser /app/alembic /app/alembic
 COPY --from=builder --chown=appuser:appuser /app/alembic.ini /app/alembic.ini

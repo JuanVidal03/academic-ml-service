@@ -12,7 +12,7 @@ htmlcov
 .vscode
 .env
 .env.local
-# Training data is only needed offline; the image ships the trained model instead.
+# Training data is only needed offline; it is seeded into the database.
 data/
 reports/
 docs/
