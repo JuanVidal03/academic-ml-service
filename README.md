@@ -146,13 +146,19 @@ Interactive API docs: <http://localhost:8000/docs>
 uv run scripts/analyze.py        # writes reports/analysis.{md,json}
 ```
 
-### Create a user (optional)
+### Create a user
 
-The `users` table exists for the authentication work that comes next:
+Every endpoint except `/health` requires a signed-in user.
 
 ```bash
-uv run scripts/create_user.py --email you@example.edu --role admin
+# A real account (prompts for a password, minimum 12 characters)
+uv run scripts/create_user.py --email you@universidad.edu.co --role admin
+
+# Or the local development account: test@universidad.edu.co / test123
+uv run scripts/seed_dev_user.py --i-know-this-is-insecure
 ```
+
+Roles are `adviser` (may request predictions) and `admin` (may also read the audit log).
 
 A bare `postgresql://` URL is rewritten to `postgresql+psycopg://` automatically, so a URL
 copied from a hosted provider works unchanged.
@@ -161,15 +167,26 @@ copied from a hosted provider works unchanged.
 
 ## API
 
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/health` | Liveness and readiness; the container's `HEALTHCHECK` calls it |
-| GET | `/` | Service banner |
-| GET | `/model/info` | Model metadata, threshold and test metrics |
-| POST | `/predict` | Assess one student |
-| POST | `/predict/batch` | Assess up to 100 students |
-| GET | `/predictions` | Paginated audit log, newest first |
-| GET | `/docs` | Interactive OpenAPI documentation |
+Sign in at `POST /auth/login` and send the token as `Authorization: Bearer <token>`.
+Accounts are created by an administrator; there is no public registration.
+
+| Method | Endpoint | Access | Description |
+|---|---|---|---|
+| POST | `/auth/login` | open | Credentials → access token + refresh cookie |
+| POST | `/auth/refresh` | cookie | Rotate the refresh token, issue a new access token |
+| POST | `/auth/logout` | open | Revoke the refresh token and clear the cookie |
+| GET | `/auth/me` | signed in | The current user |
+| GET | `/health` | **open** | Liveness; the container's `HEALTHCHECK` calls it |
+| GET | `/` | open | Service banner |
+| GET | `/model/info` | signed in | Model metadata, threshold and test metrics |
+| POST | `/predict` | signed in | Assess one student |
+| POST | `/predict/batch` | signed in | Assess up to 100 students |
+| GET | `/predictions` | **admin** | Paginated audit log, newest first |
+| GET | `/docs` | open | Interactive OpenAPI documentation |
+
+`/predictions` is admin-only because it returns every student's features and risk score; an
+adviser working with a handful of students has no business reading all of it. An adviser
+calling it gets **403**, not 401 — they are authenticated, just not permitted.
 
 ### Example
 
@@ -253,6 +270,11 @@ See `.env.example` for the annotated list.
 | Variable | Required | Purpose |
 |---|---|---|
 | `CORS_ORIGINS` | **yes** | Browser origins allowed to call the API |
+| `JWT_SECRET` | **yes** | Access-token signing key, ≥32 chars. Never reuse or commit one |
+| `ACCESS_TOKEN_MINUTES` | **yes** | Access-token lifetime (cannot be revoked once issued) |
+| `REFRESH_TOKEN_DAYS` | **yes** | Refresh-token lifetime (revocable, rotated on use) |
+| `COOKIE_SECURE` | no (`true`) | **Set `false` for local http**, or the browser drops the cookie |
+| `COOKIE_SAMESITE` | no (`lax`) | `none` needs `COOKIE_SECURE=true`; only for cross-domain setups |
 | `TEST_SIZE` | **yes** | Held-out fraction |
 | `CV_FOLDS` | **yes** | Cross-validation folds |
 | `RANDOM_STATE` | **yes** | Seed, for reproducibility |
@@ -287,7 +309,7 @@ at run time (`--env-file`), never baked into the image.
 ## Development
 
 ```bash
-uv run pytest -v            # 93 tests
+uv run pytest -v            # 125 tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
 ```

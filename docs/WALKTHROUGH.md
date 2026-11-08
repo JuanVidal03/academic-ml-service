@@ -17,7 +17,7 @@ Written against the code as it stands; every command here was run and its output
 7. [Test it](#7-test-it)
 8. [The database](#8-the-database)
 9. [Deploy](#9-deploy)
-10. [Authentication (planned)](#10-authentication-planned)
+10. [Authentication](#10-authentication)
 11. [Troubleshooting](#11-troubleshooting)
 12. [Design decisions](#12-design-decisions-and-why)
 
@@ -523,6 +523,9 @@ uv run pytest -v
 | `tests/system/test_router.py` | `/health` stays unprefixed, `/model/info`, OpenAPI |
 | `tests/model_registry/test_service.py` | **The BYTEA round-trip rebuilds a working predictor**; one active version |
 | `tests/training_data/test_service.py` | JSONB payload building: NaN → null, numpy → native |
+| `tests/auth/test_security.py` | bcrypt; JWT round-trip; **expired, tampered and `alg: none` tokens are rejected** |
+| `tests/auth/test_service.py` | credentials; **an unknown email still spends a hash**; rotation and family revocation |
+| `tests/auth/test_router.py` | login sets an **HttpOnly** cookie; identical 401s; logout is always 204 |
 | `tests/test_layering.py` | **The dependency arrows in §1 actually hold** |
 | `tests/test_error_handling.py` | An unreachable database → 503, not 500 |
 | `tests/test_config.py` | `DATABASE_URL` normalisation; derived paths; version metadata; **the seven settings have no code-side default** |
@@ -537,7 +540,7 @@ unset — worth verifying occasionally, since it is easy to lose by accident. Th
 that the schema, the migrations and the JSONB/BYTEA round-trip are **not** covered by the
 suite; §8 covers them against the real database instead.
 
-**Expect** `93 passed` in about six seconds.
+**Expect** `125 passed` in about twelve seconds.
 
 The suite trains a real model, so assertions are about real behaviour. The previous suite
 asserted `status_code in [200, 503]`, which passed whether the service worked or not; those
@@ -560,7 +563,7 @@ uv run pytest tests/ml/test_no_train_serve_skew.py -q
 # FAILED test_an_unseen_category_would_have_produced_a_different_answer
 
 cp /tmp/pipeline.bak src/dropout_service/ml/schema.py
-uv run pytest -q          # 93 passed again
+uv run pytest -q          # 125 passed again
 ```
 
 The layering tests can be checked the same way — add
@@ -732,56 +735,97 @@ traffic if you use the database. The container's own `HEALTHCHECK` already probe
 
 ---
 
-## 10. Authentication (planned)
+## 10. Authentication
 
-**Not implemented.** Every endpoint is currently open: anyone who can reach the service can
-request predictions and page through the entire prediction history, which contains personal
-student data. This is the largest outstanding gap and the next piece of work.
+Every endpoint except `/health` and `/` requires a signed-in user. Accounts are created by
+an administrator; there is no public registration, which would otherwise let anyone reach
+student dropout predictions.
 
-Because the `web-client` talks to this service directly from the browser, a shared API key
-would not be a secret — it would ship in the JavaScript bundle. The login page implies real
-user accounts, so the intended design is:
+### The token model, and why
 
-The structure is now shaped for this: auth is **one new directory**, not an edit to four
-shared files.
+| Piece | Where it lives | Lifetime |
+|---|---|---|
+| Access token (JWT) | the client's **memory** | `ACCESS_TOKEN_MINUTES` (15) |
+| Refresh token (opaque) | an **httpOnly** cookie, scoped to `/auth` | `REFRESH_TOKEN_DAYS` (7) |
 
+The access token is never written to `localStorage`. Anything JavaScript can read, an XSS
+payload can read — so the long-lived credential lives in a cookie the page cannot touch,
+and the short-lived one is lost on reload and re-fetched. A page refresh therefore calls
+`/auth/refresh` first; see §9 of the client's flow.
+
+Refresh tokens are **rows in `ml.refresh_tokens`, not self-contained JWTs**. A stateless
+refresh JWT cannot be revoked: logout would clear the cookie while a stolen copy kept
+working until it expired. With a row per token, logout revokes for real.
+
+They are also **rotated**: every refresh issues a new token and revokes the one presented.
+That makes theft detectable — a legitimate client never replays an old token, so a replay
+means the value leaked, and the whole rotation chain (`replaced_by_id`) is revoked. The real
+user is forced to sign in again, which is the right trade against leaving an attacker with a
+working credential.
+
+### File sequence: `POST /auth/login`
+
+| # | File : function | What it does |
+|---|---|---|
+| 1 | `auth/router.py:login` | Entry point |
+| 2 | `auth/schemas.py:LoginRequest` | Validate; a malformed address is a 422 |
+| 3 | `auth/service.py:authenticate` | `users/service.py:get_by_email`, then bcrypt |
+| 4 | `auth/service.py:issue_refresh_token` | Insert a row holding a SHA-256 of the token |
+| 5 | `auth/router.py:_set_refresh_cookie` | `httponly`, `secure`, `samesite`, `path=/auth` |
+| 6 | `auth/security.py:create_access_token` | Sign the JWT |
+
+And on a protected request: `dependencies.py:get_current_user` →
+`auth/security.py:decode_access_token` → `users/service.py:get_by_id`, with
+`require_admin` layered on top for `/predictions`.
+
+### Three details that are easy to get wrong
+
+**Two different hashes, on purpose.** Passwords use bcrypt because they are low-entropy and
+human-chosen, so the hash must be *slow*. Refresh tokens use SHA-256 because they are 32
+random bytes — there is nothing to guess, and bcrypt would tax every refresh for no gain.
+It looks inconsistent until you see which threat each one answers.
+
+**`decode_access_token` pins `algorithms=[...]`.** Letting PyJWT honour the token's own
+`alg` header is the classic forgery route: an attacker sets `alg: none`, drops the
+signature, and writes their own claims. `tests/auth/test_security.py` has a test that mints
+exactly that token and asserts it is rejected.
+
+**An unknown email still costs a bcrypt verification.** `authenticate` hashes against a
+dummy value when the address does not exist, so a missing account and a wrong password take
+comparable time and return an identical 401. Skipping that call is the easy mistake, and it
+turns the login endpoint into an account-enumeration oracle.
+
+### Verify it
+
+```bash
+uv run scripts/seed_dev_user.py --i-know-this-is-insecure   # test@universidad.edu.co / test123
+
+# Login, keeping the cookie jar. The cookie MUST be HttpOnly.
+curl -s -i -c /tmp/jar -X POST localhost:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"test@universidad.edu.co","password":"test123"}' | grep -i set-cookie
+
+# A wrong password and an unknown address must return the same body.
+# Rotation: refresh once, then replay the OLD cookie -> 401, and the family is revoked.
+curl -s -b /tmp/jar -c /tmp/jar -X POST localhost:8000/auth/refresh
+
+# Role gating
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/predictions                      # 401
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $ADVISER" \
+  localhost:8000/predictions                                                              # 403
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/health                            # 200
 ```
-src/dropout_service/auth/
-  router.py      POST /auth/login, GET /auth/me
-  schemas.py     LoginRequest, TokenResponse, UserRead
-  service.py     authenticate(), get_current_user()
-  security.py    JWT encode/decode  (bcrypt hashing already in scripts/create_user.py)
 
-# the table itself already exists: users/models.py + migration 0002
-```
+### Still missing
 
-| Piece | Approach |
-|---|---|
-| Storage | **Already done**: `ml.users` exists (`users/models.py`), and `scripts/create_user.py` creates accounts with bcrypt |
-| Login | `POST /auth/login` → short-lived JWT; `GET /auth/me` |
-| Hashing | `bcrypt` (via `passlib`), never a bare SHA |
-| Verification | `get_current_user` in `auth/service.py`, exposed as `CurrentUserDep` in `dependencies.py` |
-| Protected | `/predict`, `/predict/batch`, `/predictions` |
-| Open | `/health` and `/` only — the `system` router |
-
-Three wiring points, each already marked with a comment in the code:
-
-1. `main.py` — `app.include_router(auth_router)`
-2. `dependencies.py` — add `CurrentUserDep`, mirroring the existing `Annotated` aliases
-3. `alembic/env.py` — nothing to add; `users/models.py` is already imported there
-
-Put the blanket requirement on the `include_router` call for the protected routers, not on
-`system_router` — that one carries `/health`, which the container's `HEALTHCHECK` needs to
-reach unauthenticated.
-
-Worth deciding at the same time: who may read `/predictions`. A per-student risk history is
-sensitive, and advisers, administrators and researchers do not need the same access — hence
-`role` in the table above.
-
-Until this lands, keep the service on a private network and `CORS_ORIGINS` restricted to
-known frontend origins.
-
----
+- **No rate limiting on `/auth/login`.** Constant-time failure and no enumeration are in
+  place, but nothing slows down password guessing. A per-IP and per-email limiter
+  (`slowapi`) or lockout columns on `users` is the fix. **With `test123` in the database,
+  do not expose this service publicly.**
+- **No password reset.** The flow needs email delivery, which nothing here has.
+- **No CSRF token**, and none is needed as built: the refresh cookie is `SameSite=Lax` and
+  the access token travels in a header, so a cross-site form post cannot mint a request.
+  Moving the access token into a cookie *would* require one.
 
 ## 11. Troubleshooting
 
@@ -802,7 +846,10 @@ known frontend origins.
 | `ModuleNotFoundError` naming a module **when loading the model** | The stored artefact predates a module move; the pickle holds import paths | `uv run scripts/train.py` to rebuild it |
 | `ValidationError` naming settings at startup | No `.env`, or a key missing from it | `cp .env.example .env`; in Docker pass `--env-file .env` |
 | 500 from a database endpoint | Should not happen — `SQLAlchemyError` is mapped to 503 | Check the logs; if it is genuinely a 500, the handler in `main.py` was bypassed |
-| CORS error in the browser | Origin not allowed | Add it to `CORS_ORIGINS` |
+| CORS error in the browser | Origin not allowed | Add it to `CORS_ORIGINS`; a wildcard will not work with credentials |
+| Login works but every refresh 401s | `COOKIE_SECURE=true` over plain http, so the browser dropped the cookie | Set `COOKIE_SECURE=false` for local development |
+| 403 on `/predictions` | Signed in as an adviser | Admin only; use an admin account |
+| 401 everywhere right after a refresh | A replayed refresh token revoked the chain | Sign in again; it is the theft-detection path |
 | Predictions all look similar | Model is weak by nature (AUC 0.77) | Expected; use ranking, not absolutes |
 
 Read the logs first — startup reports whether the model loaded and whether the database was
