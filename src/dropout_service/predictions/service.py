@@ -23,6 +23,7 @@ def log_predictions(
     students: Sequence[PredictionRequest],
     results: Sequence[PredictionResult],
     model_version_id: int | None,
+    user_id: int | None = None,
 ) -> None:
     """Persist one audit row per prediction, in a single transaction.
 
@@ -50,6 +51,7 @@ def log_predictions(
                         risk_level=result.riesgo,
                         model_version_id=model_version_id,
                         student_id=linked.id if linked else None,
+                        user_id=user_id,
                     )
                 )
             session.commit()

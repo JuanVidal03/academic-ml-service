@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from dropout_service import __version__
+from dropout_service.auth.router import router as auth_router
 from dropout_service.config import Settings, configure_logging, get_settings
 from dropout_service.database import create_db_engine, create_session_factory
 from dropout_service.model_registry.service import load_active
@@ -30,7 +31,8 @@ Predicts academic dropout risk for university students.
 The model is trained offline and stored in PostgreSQL; the service loads the active version
 at startup. A database is required.
 
-**Note:** these endpoints are currently unauthenticated. See `docs/WALKTHROUGH.md`.
+Sign in at `POST /auth/login` and send the returned token as `Authorization: Bearer ...`.
+Accounts are created by an administrator; there is no public registration.
 """
 
 
@@ -98,11 +100,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content={"detail": "Database unavailable."},
         )
 
+    # system_router carries /health, which the container's HEALTHCHECK calls, so it must
+    # stay reachable without credentials. The other routers declare their own requirements
+    # per route rather than a blanket one, because /predict and /predictions differ.
     app.include_router(system_router)
+    app.include_router(auth_router)
     app.include_router(predictions_router)
-    # When auth arrives, register its router here. A blanket requirement goes on the
-    # include_router call for the protected routers -- not on system_router, which carries
-    # /health and must stay reachable for the container's HEALTHCHECK.
     return app
 
 

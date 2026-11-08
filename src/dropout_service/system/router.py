@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Request
 
 from dropout_service.database import check_connection
-from dropout_service.dependencies import PredictorDep
+from dropout_service.dependencies import CurrentUserDep, PredictorDep
 from dropout_service.predictions.schemas import HealthResponse, ModelInfoResponse
 
 router = APIRouter(tags=["system"])
@@ -11,7 +11,7 @@ router = APIRouter(tags=["system"])
 
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
-    """Report liveness.
+    """Report liveness. Deliberately unauthenticated.
 
     The container's ``HEALTHCHECK`` calls this. It returns 200 even when the model is
     missing, reporting ``status: "degraded"`` instead: a missing model is a broken
@@ -33,8 +33,8 @@ async def root() -> dict[str, str]:
 
 
 @router.get("/model/info", response_model=ModelInfoResponse)
-async def model_info(predictor: PredictorDep) -> ModelInfoResponse:
-    """Describe the model currently serving traffic."""
+async def model_info(predictor: PredictorDep, _user: CurrentUserDep) -> ModelInfoResponse:
+    """Describe the model currently serving traffic. Requires authentication."""
     metadata = predictor.metadata
     return ModelInfoResponse(
         model_name=predictor.model_name,

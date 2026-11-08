@@ -38,6 +38,11 @@ class Prediction(Base):
     student_id: Mapped[int | None] = mapped_column(
         ForeignKey(f"{SCHEMA}.students.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    #: Who requested it. An audit log of access to student data should say who did the
+    #: accessing; SET NULL rather than CASCADE so deleting a user cannot erase the trail.
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # Indexed because the history endpoint orders by it.
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False, index=True
