@@ -10,7 +10,32 @@ The trade-off is explicit: the schema, the migrations and the JSONB/BYTEA round-
 `docs/WALKTHROUGH.md`.
 """
 
+import os
+from contextlib import contextmanager
 from datetime import UTC, datetime
+
+# Set before any dropout_service import: main.py builds `app = create_app()` at module
+# scope, which calls get_settings() and would otherwise read the developer's .env. These
+# defaults make the suite independent of it -- previously the tests only *looked*
+# independent because a complete .env happened to be present.
+_TEST_ENV = {
+    "DATABASE_URL": "postgresql://nobody@127.0.0.1:1/absent",
+    "CORS_ORIGINS": '["http://testserver"]',
+    "TEST_SIZE": "0.2",
+    "CV_FOLDS": "5",
+    "RANDOM_STATE": "42",
+    "TARGET_RECALL": "0.80",
+    "RISK_THRESHOLD_MEDIUM": "0.30",
+    "RISK_THRESHOLD_HIGH": "0.60",
+    "JWT_SECRET": "test-signing-key-that-is-at-least-32-characters-long",
+    "ACCESS_TOKEN_MINUTES": "15",
+    "REFRESH_TOKEN_DAYS": "7",
+    # LOG_LEVEL is deliberately NOT pinned: it has a safe default, and pinning it here
+    # leaks into Settings via os.environ even when _env_file=None, breaking the test that
+    # asserts the fallback.
+}
+for _key, _value in _TEST_ENV.items():
+    os.environ.setdefault(_key, _value)
 
 import pandas as pd
 import pytest
@@ -22,6 +47,7 @@ from dropout_service.main import create_app
 from dropout_service.ml.predict import Predictor
 from dropout_service.ml.schema import ALL_FEATURES, TARGET_COLUMN, build_pipeline
 from dropout_service.ml.training.data import prepare_dataset
+from dropout_service.users.models import User
 
 SAMPLE_SIZE = 600
 
@@ -40,6 +66,9 @@ REQUIRED_SETTINGS: dict = {
     "target_recall": 0.80,
     "risk_threshold_medium": 0.30,
     "risk_threshold_high": 0.60,
+    "jwt_secret": "test-signing-key-that-is-at-least-32-characters-long",
+    "access_token_minutes": 15,
+    "refresh_token_days": 7,
 }
 
 
@@ -159,16 +188,41 @@ def fake_session():
     return FakeSession()
 
 
-@pytest.fixture
-def client(test_settings, predictor) -> TestClient:
-    """A client whose app has a model loaded and a faked session layer."""
-    from dropout_service.dependencies import get_predictor, get_session_factory, require_session
+def _fake_user(role: str, user_id: int = 1) -> User:
+    """A detached User instance: no session, no database."""
+    return User(
+        id=user_id,
+        email=f"{role}@universidad.edu.co",
+        password_hash="unused-in-tests",
+        role=role,
+        is_active=True,
+    )
+
+
+@contextmanager
+def _client_for(test_settings, predictor, role: str | None):
+    """Build a TestClient with the session layer faked and, optionally, a signed-in user.
+
+    ``role=None`` leaves ``get_current_user`` real, so protected routes answer 401 -- that
+    is how the unauthenticated cases are exercised. Supplying a role overrides *only*
+    ``get_current_user``; ``require_admin`` stays real, so the adviser/admin distinction is
+    genuinely tested rather than stubbed away.
+    """
+    from dropout_service.dependencies import (
+        get_current_user,
+        get_predictor,
+        get_session_factory,
+        require_session,
+    )
 
     app = create_app(test_settings)
     session = FakeSession()
     app.dependency_overrides[get_predictor] = lambda: predictor
     app.dependency_overrides[get_session_factory] = lambda: lambda: session
     app.dependency_overrides[require_session] = lambda: session
+    if role is not None:
+        user = _fake_user(role)
+        app.dependency_overrides[get_current_user] = lambda: user
 
     with TestClient(app) as test_client:
         # /health reads app.state directly -- it has to, since get_predictor raises 503
@@ -176,6 +230,27 @@ def client(test_settings, predictor) -> TestClient:
         # (the test database is unreachable), so inject it after startup.
         app.state.predictor = predictor
         test_client.fake_session = session  # type: ignore[attr-defined]
+        yield test_client
+
+
+@pytest.fixture
+def client(test_settings, predictor) -> TestClient:
+    """Signed in as an adviser -- the ordinary case for the prediction endpoints."""
+    with _client_for(test_settings, predictor, "adviser") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def admin_client(test_settings, predictor) -> TestClient:
+    """Signed in as an administrator."""
+    with _client_for(test_settings, predictor, "admin") as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def anon_client(test_settings, predictor) -> TestClient:
+    """Not signed in. Protected routes must answer 401."""
+    with _client_for(test_settings, predictor, None) as test_client:
         yield test_client
 
 

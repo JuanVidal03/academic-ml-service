@@ -13,10 +13,18 @@ def test_unreachable_database_returns_503_not_500(settings_factory):
 
     Previously this surfaced as an opaque 500, which gave the caller no way to tell a
     broken dependency from a bad request -- and in production an unreachable database is
-    by far the more likely cause.
+    by far the more likely cause. The admin dependency is overridden so the request gets
+    past authentication and actually reaches the database.
     """
+    from dropout_service.dependencies import get_current_user
+    from dropout_service.users.models import User
+
     settings = settings_factory(database_url=UNREACHABLE_DB, log_level="CRITICAL")
-    with TestClient(create_app(settings)) as client:
+    app = create_app(settings)
+    app.dependency_overrides[get_current_user] = lambda: User(
+        id=1, email="admin@universidad.edu.co", password_hash="x", role="admin", is_active=True
+    )
+    with TestClient(app) as client:
         response = client.get("/predictions")
 
     assert response.status_code == 503

@@ -61,9 +61,9 @@ def test_missing_required_field_is_rejected(client, student):
     assert client.post(PREDICT, json=student).status_code == 422
 
 
-def test_history_returns_a_page(client):
+def test_history_returns_a_page(admin_client):
     """Served from a faked session, so no database is involved."""
-    response = client.get(HISTORY)
+    response = admin_client.get(HISTORY)
     assert response.status_code == 200
     body = response.json()
     assert body["page"] == 1
@@ -87,3 +87,20 @@ def test_codigo_is_not_a_model_feature():
 
 def test_removed_records_endpoint_is_gone(client, student):
     assert client.post("/records", json=student).status_code == 404
+
+
+def test_prediction_endpoints_require_authentication(anon_client, student):
+    """The whole point of the auth work: no token, no predictions."""
+    assert anon_client.post(PREDICT, json=student).status_code == 401
+    assert anon_client.post(BATCH, json={"students": [student]}).status_code == 401
+    assert anon_client.get(HISTORY).status_code == 401
+
+
+def test_history_is_admin_only(client, student):
+    """An adviser may predict but must not read the whole audit log.
+
+    403, not 401: the caller proved who they are and simply is not permitted, so telling
+    them to re-authenticate would be misleading.
+    """
+    assert client.post(PREDICT, json=student).status_code == 200
+    assert client.get(HISTORY).status_code == 403
