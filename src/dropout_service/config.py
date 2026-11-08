@@ -3,8 +3,9 @@
 import logging
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -53,6 +54,20 @@ class Settings(BaseSettings):
     # --- Risk banding (institutional policy, not a statistical result) ---
     risk_threshold_medium: float
     risk_threshold_high: float
+
+    # --- Authentication (required) ---
+    # No default, ever: a shipped signing key means anyone can mint a valid token for any
+    # account. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+    jwt_secret: str = Field(min_length=32)
+    access_token_minutes: int
+    refresh_token_days: int
+    #: Changing this is a code-level decision, not an operational knob.
+    jwt_algorithm: str = "HS256"
+    #: Defaults to the safe value. A browser silently REFUSES a Secure cookie over plain
+    #: http://localhost, so local development must set COOKIE_SECURE=false -- otherwise
+    #: login appears to work and every refresh fails.
+    cookie_secure: bool = True
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
 
     @field_validator("database_url")
     @classmethod

@@ -9,13 +9,14 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool, text
 
 from alembic import context
-from dropout_service.config import get_settings
-from dropout_service.database import SCHEMA, Base
 
 # LOAD-BEARING: a table is only registered on Base.metadata once its module is imported.
 # Without these imports `alembic revision --autogenerate` would see the tables in the
 # database but not in the metadata, and emit a migration that DROPS them. Add a line here
 # for every new slice that owns tables.
+from dropout_service.auth import models as _auth_models  # noqa: E402,F401
+from dropout_service.config import get_settings
+from dropout_service.database import SCHEMA, Base
 from dropout_service.model_registry import models as _model_registry_models  # noqa: E402,F401
 from dropout_service.predictions import models as _predictions_models  # noqa: E402,F401
 from dropout_service.students import models as _students_models  # noqa: E402,F401
