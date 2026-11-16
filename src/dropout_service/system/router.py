@@ -51,4 +51,7 @@ async def model_info(predictor: PredictorDep, _user: CurrentUserDep) -> ModelInf
             },
         ),
         test_metrics=metadata.get("test_metrics", {}),
+        # Already stored by training; surfacing it costs nothing and is what the model
+        # page needs to show how the five algorithms scored.
+        comparison=metadata.get("comparison", []),
     )

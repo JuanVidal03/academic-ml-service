@@ -19,8 +19,9 @@ from dropout_service import __version__
 from dropout_service.auth.router import router as auth_router
 from dropout_service.config import Settings, configure_logging, get_settings
 from dropout_service.database import create_db_engine, create_session_factory
-from dropout_service.model_registry.service import load_active
+from dropout_service.model_registry.service import load_active, load_candidates
 from dropout_service.predictions.router import router as predictions_router
+from dropout_service.stats.router import router as stats_router
 from dropout_service.system.router import router as system_router
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.engine = None
         app.state.session_factory = None
         app.state.predictor = None
+        app.state.candidates = []
 
         # Startup stays tolerant of an unreachable database on purpose. The database is
         # required, but crash-looping through a brief outage would hide the reason: /health
@@ -57,6 +59,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             app.state.session_factory = create_session_factory(engine)
             with app.state.session_factory() as session:
                 app.state.predictor = load_active(session)
+                if app.state.predictor is not None:
+                    app.state.candidates = load_candidates(
+                        session, app.state.predictor.model_version_id
+                    )
         except Exception as exc:  # noqa: BLE001 - any failure here means degraded, not dead
             logger.error(
                 "Could not load the active model, starting degraded: %s: %s",
@@ -106,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(system_router)
     app.include_router(auth_router)
     app.include_router(predictions_router)
+    app.include_router(stats_router)
     return app
 
 

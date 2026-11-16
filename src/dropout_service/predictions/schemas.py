@@ -16,7 +16,11 @@ from dropout_service.ml.predict import PredictionResult, RiskLevel
 from dropout_service.ml.schema import StudentFeatures
 
 __all__ = [
+    "BatchComparePredictionResponse",
     "BatchPredictionRequest",
+    "ComparePredictionResponse",
+    "ModelComparisonRow",
+    "ModelPrediction",
     "PredictionRequest",
     "BatchPredictionResponse",
     "HealthResponse",
@@ -56,6 +60,17 @@ class BatchPredictionResponse(BaseModel):
     count: int
 
 
+class ModelComparisonRow(BaseModel):
+    """One algorithm's cross-validated scores from the training comparison."""
+
+    model: str
+    roc_auc_mean: float
+    roc_auc_std: float
+    f1_mean: float
+    recall_mean: float
+    accuracy_mean: float
+
+
 class ModelInfoResponse(BaseModel):
     """Metadata about the model currently serving traffic."""
 
@@ -66,6 +81,37 @@ class ModelInfoResponse(BaseModel):
     decision_threshold: float
     risk_bands: dict[str, list[float]]
     test_metrics: dict
+    #: How the five algorithms scored during training, best first.
+    comparison: list[ModelComparisonRow] = Field(default_factory=list)
+
+
+class ModelPrediction(PredictionResult):
+    """One algorithm's answer for a student.
+
+    Carries its own ``decision_threshold`` because that is the only way the numbers read
+    consistently: two models can report similar probabilities and opposite verdicts, and
+    without the cut-point that looks like a bug rather than calibration.
+    """
+
+    algorithm: str
+    is_best: bool
+    decision_threshold: float
+    cv_metrics: dict = Field(default_factory=dict)
+    test_metrics: dict = Field(default_factory=dict)
+
+
+class ComparePredictionResponse(BaseModel):
+    """Every stored algorithm's answer for one student, best first."""
+
+    best_algorithm: str
+    models: list[ModelPrediction]
+
+
+class BatchComparePredictionResponse(BaseModel):
+    """Every stored algorithm's answer for each submitted student, in submitted order."""
+
+    comparisons: list[ComparePredictionResponse]
+    count: int
 
 
 class HealthResponse(BaseModel):

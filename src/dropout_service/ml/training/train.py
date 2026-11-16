@@ -192,11 +192,81 @@ def evaluate(
     }
 
 
+class CandidateResult(NamedTuple):
+    """One algorithm, fitted and scored, ready to be asked for a verdict."""
+
+    algorithm: str
+    pipeline: Pipeline
+    cv_metrics: dict[str, Any]
+    test_metrics: dict[str, Any]
+    decision_threshold: float
+    is_best: bool
+
+
 class TrainingResult(NamedTuple):
     """What a training run produced. Persisting it is the caller's job."""
 
     pipeline: Pipeline
     metadata: dict[str, Any]
+    candidates: list[CandidateResult]
+
+
+def fit_candidates(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
+    comparison: pd.DataFrame,
+    cv: StratifiedKFold,
+    best_name: str,
+    best_pipeline: Pipeline,
+    best_threshold: float,
+    best_metrics: dict[str, Any],
+) -> list[CandidateResult]:
+    """Fit and score every algorithm, so each can answer for a given student.
+
+    The winner is not refitted -- it is passed in already tuned, and refitting it with
+    default parameters would make the stored "best" model differ from the deployed one.
+
+    Every other candidate gets **its own** calibrated threshold. Reusing the winner's would
+    be wrong: a RandomForest probability of 0.35 does not mean what a LogisticRegression
+    probability of 0.35 means, so a shared cut-point would produce verdicts that ignore each
+    model's own recall target.
+    """
+    settings = get_settings()
+    cv_by_algorithm = {row["model"]: row for row in comparison.to_dict(orient="records")}
+    results: list[CandidateResult] = [
+        CandidateResult(
+            algorithm=best_name,
+            pipeline=best_pipeline,
+            cv_metrics=cv_by_algorithm.get(best_name, {}),
+            test_metrics=best_metrics,
+            decision_threshold=best_threshold,
+            is_best=True,
+        )
+    ]
+
+    for name, estimator in CANDIDATES.items():
+        if name == best_name:
+            continue
+        logger.info("Fitting %s for comparison...", name)
+        pipeline = build_pipeline(_seeded(estimator, settings.random_state))
+        pipeline.fit(X_train, y_train)
+        threshold = select_threshold(pipeline, X_train, y_train, cv, settings.target_recall)
+        results.append(
+            CandidateResult(
+                algorithm=name,
+                pipeline=pipeline,
+                cv_metrics=cv_by_algorithm.get(name, {}),
+                test_metrics=evaluate(pipeline, X_test, y_test, threshold),
+                decision_threshold=threshold,
+                is_best=False,
+            )
+        )
+
+    # Best first, then by cross-validated ROC-AUC, which is the order the UI shows.
+    results.sort(key=lambda c: (not c.is_best, -float(c.cv_metrics.get("roc_auc_mean", 0.0))))
+    return results
 
 
 def run_training(frame: pd.DataFrame) -> TrainingResult:
@@ -251,4 +321,9 @@ def run_training(frame: pd.DataFrame) -> TrainingResult:
         "test_metrics": metrics,
         "comparison": comparison.to_dict(orient="records"),
     }
-    return TrainingResult(pipeline=pipeline, metadata=metadata)
+
+    candidates = fit_candidates(
+        X_train, y_train, X_test, y_test, comparison, cv, best_name, pipeline, threshold, metrics
+    )
+    logger.info("Fitted %d candidate models for comparison", len(candidates))
+    return TrainingResult(pipeline=pipeline, metadata=metadata, candidates=candidates)

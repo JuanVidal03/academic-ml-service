@@ -36,6 +36,15 @@ def get_predictor(request: Request) -> Predictor:
     return predictor
 
 
+def get_candidates(request: Request) -> list:
+    """The stored algorithms, loaded once at startup alongside the active model.
+
+    Empty when the deployment predates candidate storage, which the route reports rather
+    than crashing -- a model trained before migration 0004 has no candidates to show.
+    """
+    return getattr(request.app.state, "candidates", []) or []
+
+
 def get_session_factory(request: Request) -> sessionmaker | None:
     """Return the session factory.
 
@@ -117,6 +126,7 @@ def require_admin(user: Annotated[User, Depends(get_current_user)]) -> User:
 
 
 SettingsDep = Annotated[Settings, Depends(get_settings_dep)]
+CandidatesDep = Annotated[list, Depends(get_candidates)]
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 AdminUserDep = Annotated[User, Depends(require_admin)]
 PredictorDep = Annotated[Predictor, Depends(get_predictor)]
