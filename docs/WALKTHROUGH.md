@@ -277,11 +277,11 @@ Inside step 7, `ml/schema.py:build_pipeline` → `build_preprocessor` assembles:
 
 ```
   Algorithm          : LogisticRegression
-  Decision threshold : 0.3505
+  Decision threshold : 0.3025
   ROC-AUC            : 0.7695
-  Recall             : 0.7909
-  Precision          : 0.6029
-  F1                 : 0.6842
+  Recall             : 0.8631
+  Precision          : 0.5835
+  F1                 : 0.6963
   Accuracy           : 0.6800
 ```
 
@@ -292,7 +292,7 @@ psql "$DATABASE_URL" -tAc "
   select algorithm, n_features, round(decision_threshold::numeric, 4),
          round((metrics->'test_metrics'->>'roc_auc')::numeric, 4), length(artifact)
   from ml.model_versions where is_active;"
-# LogisticRegression|34|0.3505|0.7695|10874
+# LogisticRegression|34|0.3025|0.7695|10874
 ```
 
 **Sanity check, not celebration.** ROC-AUC should land near **0.77**. A sudden jump to 0.95+
@@ -308,7 +308,7 @@ until step 10.
 
 *The threshold is 0.35, not 0.5.* `pipeline.predict()` hardcodes 0.5, which is why
 `Predictor` calls `predict_proba` and compares against the stored threshold instead. Raising
-recall from 0.58 to 0.79 is the entire point of calibrating it.
+recall from 0.58 to 0.86 is the entire point of calibrating it.
 
 **The artefact is coupled to the package path.** The stored artefact is a pickle, and it holds
 `ml/schema.py:coerce_missing_to_nan` by its *import path*. Renaming or moving the package
@@ -911,7 +911,7 @@ pipeline rather than patching it at the serving edge.
 `pipeline.predict()` hardcodes 0.5. For an early-warning system that is the wrong operating
 point: missing a student who drops out costs a degree, while a false alarm costs one advising
 conversation. `ml/training/train.py:select_threshold` picks the threshold meeting
-`TARGET_RECALL` (0.80),
+`TARGET_RECALL` (0.85),
 stores it alongside the artefact in `ml.model_versions`, and `Predictor` compares
 `predict_proba` against it. Recall goes from 0.58 to 0.79.
 

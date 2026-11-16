@@ -48,15 +48,16 @@ equals `3 × materias_reprobadas` exactly, so it carries no additional informati
 
 ## Model performance
 
-Measured on the 600-student held-out test set, at the calibrated threshold of **0.3505**:
+Measured on the 600-student held-out test set, at the calibrated threshold of **0.3025**
+(`TARGET_RECALL=0.85`):
 
-| Metric | Value |
-|---|---|
-| ROC-AUC | 0.7695 |
-| Recall | 0.7909 |
-| Precision | 0.6029 |
-| F1 | 0.6842 |
-| Accuracy | 0.6800 |
+| Metric | Value | |
+|---|---|---|
+| Recall | **0.8631** | 86.3% of real dropouts are caught |
+| Precision | 0.5835 | 58.4% of flagged students really dropped out |
+| F1 | 0.6963 | |
+| ROC-AUC | 0.7695 | threshold-independent; the ranking quality |
+| Accuracy | 0.6700 | |
 
 Cross-validated comparison on the training set (5-fold, ranked by ROC-AUC):
 
@@ -74,10 +75,55 @@ the most accurate, and the gradient-boosted alternatives were overfitting.
 
 **Why recall is prioritised.** The errors are not symmetric. Missing a student who goes on
 to drop out costs a person their degree; flagging a student who was fine costs one advising
-conversation. The decision threshold is therefore calibrated to reach 80% recall rather than
-left at the default 0.5, which raises recall from 0.58 to 0.79 — roughly 56 additional
-at-risk students caught per 1,000 — at the cost of more false alarms. Tune this with
-`TARGET_RECALL`.
+conversation. The decision threshold is therefore calibrated to reach 85% recall rather than
+left at the default 0.5, which raises recall from 0.58 to 0.86 at the cost of more false
+alarms: the service flags **65% of students to catch 86% of dropouts**, and about 42% of
+those flags are precautionary. Tune this with `TARGET_RECALL`.
+
+### Why ROC-AUC is 0.77 and will not become 0.85
+
+Worth stating plainly, because "improve the model" usually means "add data" and here that
+does not work. Two things were measured rather than assumed.
+
+**More rows do not help.** The learning curve is flat:
+
+| Training rows | Train ROC-AUC | Test ROC-AUC |
+|---|---|---|
+| 240 | 0.8571 | 0.7401 |
+| 600 | 0.8271 | 0.7615 |
+| 1,200 | 0.8088 | 0.7676 |
+| 1,800 | 0.8028 | 0.7736 |
+| 2,400 | 0.7934 | 0.7740 |
+
+Quadrupling the data from 600 to 2,400 rows bought **+0.0125** ROC-AUC, and the last 600
+rows bought **+0.0004**. Train and test scores have converged (0.793 vs 0.774), which is the
+signature of a model limited by the *information in its features*, not by sample size. More
+rows — real or synthetic — cannot close a 0.08 gap. Generating extra synthetic rows from the
+same distribution would make the number look better only if they leaked into the test split,
+which would be measuring nothing.
+
+**Engineered features do not help either.** Six were tried — approval rate, grade trend,
+gap against the cumulative average, work/study ratio, attendance×grade, and a composite
+academic-risk count:
+
+| Feature set | ROC-AUC |
+|---|---|
+| 34 baseline features | 0.7740 |
+| + 6 engineered features | 0.7741 |
+| + 6 engineered, HistGradientBoosting | 0.7479 |
+
+**+0.0001.** The linear model already extracts what these columns contain; the ratios are
+algebraic combinations of features it can already weight.
+
+**What would actually move it:** different *columns*, not more rows — LMS login frequency,
+assignment submission timing, financial holds, advising attendance. That is a data-collection
+project, not a modelling one.
+
+**What 85% is reachable on: recall.** Recall is a threshold choice, so `TARGET_RECALL=0.85`
+reaches it directly — and F1 improved as a side effect (0.6842 → 0.6963). ROC-AUC is
+unchanged at 0.7695, because moving a threshold cannot change how well a model *ranks*.
+This is the honest way to put 85% on the dashboard; raising ROC-AUC to 0.85 with this
+dataset is not available.
 
 Most influential features, by permutation importance (held-out ROC-AUC drop when shuffled):
 
@@ -179,14 +225,31 @@ Accounts are created by an administrator; there is no public registration.
 | GET | `/health` | **open** | Liveness; the container's `HEALTHCHECK` calls it |
 | GET | `/` | open | Service banner |
 | GET | `/model/info` | signed in | Model metadata, threshold and test metrics |
-| POST | `/predict` | signed in | Assess one student |
-| POST | `/predict/batch` | signed in | Assess up to 100 students |
+| POST | `/predict` | signed in | Assess one student with the deployed model |
+| POST | `/predict/compare` | signed in | Assess one student with **every** stored algorithm, best first |
+| POST | `/predict/batch` | signed in | Assess up to 100 students with the deployed model |
+| POST | `/predict/batch/compare` | signed in | Assess up to 100 students with **every** algorithm |
+| GET | `/stats/overview` | signed in | Aggregate counts for the dashboard |
 | GET | `/predictions` | **admin** | Paginated audit log, newest first |
 | GET | `/docs` | open | Interactive OpenAPI documentation |
 
 `/predictions` is admin-only because it returns every student's features and risk score; an
 adviser working with a handful of students has no business reading all of it. An adviser
 calling it gets **403**, not 401 — they are authenticated, just not permitted.
+`/stats/overview` is open to any signed-in user because it returns counts, not records.
+
+### Comparing algorithms
+
+Training fits all five candidates and stores each one, so `/predict/compare` and
+`/predict/batch/compare` can report what every algorithm would say about the same student. **Each applies its own calibrated
+threshold** — the spread is real (0.2504 to 0.3800 in the current run), so reusing the
+winner's cut-point would misrepresent the others. Two models can therefore report similar
+probabilities and opposite verdicts, which is calibration rather than a bug.
+
+The batch form costs the same five prediction passes as the single form, because each
+candidate predicts the whole batch in one vectorised call rather than once per student.
+Both write **one** audit row per student -- the deployed model's answer, the one that was
+acted on -- not one per algorithm.
 
 ### Example
 
@@ -241,7 +304,7 @@ Response (verified against the committed model):
 }
 ```
 
-- `deserta` — `true` when `probabilidad >= decision_threshold` (0.3505, not 0.5)
+- `deserta` — `true` when `probabilidad >= decision_threshold` (0.3025, not 0.5)
 - `probabilidad` — estimated dropout probability
 - `riesgo` — `bajo` (< 0.30), `medio` (0.30–0.60), `alto` (>= 0.60)
 
@@ -309,7 +372,7 @@ at run time (`--env-file`), never baked into the image.
 ## Development
 
 ```bash
-uv run pytest -v            # 125 tests
+uv run pytest -v            # 144 tests
 uv run ruff check .         # lint
 uv run ruff format .        # format
 ```
