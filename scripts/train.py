@@ -21,7 +21,9 @@ def main() -> None:
     with session_factory() as session:
         frame = load_training_frame(session)
         result = run_training(frame)
-        version = save_version(session, result.pipeline, result.metadata)
+        version = save_version(
+            session, result.pipeline, result.metadata, candidates=result.candidates
+        )
         version_id, version_label = version.id, version.version
 
     metrics = result.metadata["test_metrics"]
@@ -36,6 +38,7 @@ def main() -> None:
     print(f"  F1                 : {metrics['f1']:.4f}")
     print(f"  Accuracy           : {metrics['accuracy']:.4f}")
     print(f"\n  Stored as model_versions id={version_id} ({version_label}), active")
+    print(f"  Comparable candidates stored: {len(result.candidates)}")
 
 
 if __name__ == "__main__":
