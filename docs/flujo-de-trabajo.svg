@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 650" width="1180" height="650" font-family="Inter, Helvetica Neue, Arial, sans-serif">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0ea5e9"/>
+    </marker>
+    <marker id="arW" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#d97706"/>
+    </marker>
+    <style>
+      .t    { font-size:17px; font-weight:700; fill:#0f172a }
+      .s    { font-size:13px; fill:#475569 }
+      .m    { font-size:12.5px; fill:#475569; font-family:ui-monospace, SFMono-Regular, Menlo, monospace }
+      .tag  { font-size:11.5px; font-weight:700; fill:#ffffff }
+      .lbl  { font-size:12.5px; font-weight:600; fill:#475569 }
+      .lblA { font-size:12.5px; font-weight:600; fill:#0284c7 }
+      .lblW { font-size:12.5px; font-weight:600; fill:#b45309 }
+      .edge { stroke:#64748b; stroke-width:2; fill:none; marker-end:url(#ar) }
+      .edgeA{ stroke:#0ea5e9; stroke-width:2.4; fill:none; marker-end:url(#arA) }
+      .edgeW{ stroke:#d97706; stroke-width:2; fill:none; marker-end:url(#arW); stroke-dasharray:6 4 }
+    </style>
+  </defs>
+
+  <rect width="1180" height="650" fill="#f8fafc"/>
+
+  <text x="40" y="52" font-size="25" font-weight="750" fill="#0f172a">Predicción de deserción académica — flujo de trabajo</text>
+  <text x="40" y="78" font-size="14" fill="#64748b">El modelo se entrena offline y vive en la base de datos; la API solo lo carga y lo sirve.</text>
+
+  <!-- 1 · OFFLINE -->
+  <rect x="40" y="118" width="310" height="152" rx="14" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.8"/>
+  <rect x="60" y="138" width="24" height="21" rx="7" fill="#d97706"/>
+  <text class="tag" x="72" y="153" text-anchor="middle">1</text>
+  <text class="t" x="94" y="154">Entrenamiento (offline)</text>
+  <text class="m" x="60" y="186">scripts/seed_db.py · train.py</text>
+  <text class="s" x="60" y="212">Dataset de 3.000 estudiantes,</text>
+  <text class="s" x="60" y="232">34 features. Compara 5 algoritmos</text>
+  <text class="s" x="60" y="252">y calibra el umbral para recall 85 %.</text>
+
+  <!-- 2 · DB -->
+  <rect x="435" y="118" width="310" height="152" rx="14" fill="#eef2ff" stroke="#6366f1" stroke-width="1.8"/>
+  <rect x="455" y="138" width="24" height="21" rx="7" fill="#4f46e5"/>
+  <text class="tag" x="467" y="153" text-anchor="middle">2</text>
+  <text class="t" x="489" y="154">PostgreSQL</text>
+  <text class="m" x="455" y="186">model_versions · predictions</text>
+  <text class="s" x="455" y="212">Guarda el modelo entrenado, los</text>
+  <text class="s" x="455" y="232">datos y la bitácora de auditoría.</text>
+  <text class="s" x="455" y="252">No hay archivos de modelo.</text>
+
+  <!-- 3 · API -->
+  <rect x="435" y="380" width="310" height="152" rx="14" fill="#ecfdf5" stroke="#10b981" stroke-width="1.8"/>
+  <rect x="455" y="400" width="24" height="21" rx="7" fill="#059669"/>
+  <text class="tag" x="467" y="415" text-anchor="middle">3</text>
+  <text class="t" x="489" y="416">API FastAPI</text>
+  <text class="m" x="455" y="448">/predict · /stats · /auth</text>
+  <text class="s" x="455" y="474">Valida la entrada, predice y devuelve</text>
+  <text class="s" x="455" y="494">probabilidad + nivel de riesgo.</text>
+  <text class="s" x="455" y="514">Login con JWT y roles.</text>
+
+  <!-- 4 · CLIENT -->
+  <rect x="830" y="380" width="310" height="152" rx="14" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.8"/>
+  <rect x="850" y="400" width="24" height="21" rx="7" fill="#2563eb"/>
+  <text class="tag" x="862" y="415" text-anchor="middle">4</text>
+  <text class="t" x="884" y="416">Cliente web (React)</text>
+  <text class="m" x="850" y="448">web-client · Vite + shadcn/ui</text>
+  <text class="s" x="850" y="474">Formulario individual o por lotes,</text>
+  <text class="s" x="850" y="494">dashboard e historial.</text>
+  <text class="s" x="850" y="514">El historial es solo para admin.</text>
+
+  <!-- arrows -->
+  <path class="edge" d="M350,194 H431"/>
+  <text class="lbl" x="390" y="182" text-anchor="middle">guarda</text>
+
+  <path class="edgeA" d="M560,270 V376"/>
+  <text class="lblA" x="575" y="318">carga el modelo activo al arrancar</text>
+
+  <path class="edgeW" d="M640,376 V274"/>
+  <text class="lblW" x="655" y="348">registra cada predicción</text>
+
+  <path class="edgeA" d="M749,440 H826"/>
+  <path class="edgeA" d="M826,478 H749"/>
+  <text class="lblA" x="788" y="512" text-anchor="middle" font-size="11.5">HTTP</text>
+  <text class="lblA" x="788" y="528" text-anchor="middle" font-size="11.5">JSON</text>
+
+  <!-- aside: user -->
+  <rect x="40" y="380" width="310" height="152" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text class="t" x="60" y="416">Resultado</text>
+  <text class="s" x="60" y="446">Por cada estudiante devuelve si está</text>
+  <text class="s" x="60" y="466">en riesgo, la probabilidad y la banda</text>
+  <text class="s" x="60" y="486">bajo / medio / alto.</text>
+  <text class="s" x="60" y="514" font-style="italic">Es una ayuda para priorizar, no una decisión.</text>
+
+  <text x="40" y="590" font-size="13" fill="#64748b">Separación clave: entrenar y servir son procesos distintos. La base de datos es lo único que los conecta.</text>
+</svg>
