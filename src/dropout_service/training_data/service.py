@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import func, select
+from sqlalchemy import bindparam, func, insert, select, update
 from sqlalchemy.orm import Session
 
 from dropout_service.ml.schema import ALL_FEATURES, TARGET_COLUMN, TARGET_MAP
-from dropout_service.students.service import upsert_by_codigo
+from dropout_service.students.models import Student
 from dropout_service.training_data.models import AnalysisReport, TrainingRecord
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,13 @@ def load_training_frame(session: Session) -> pd.DataFrame:
     return frame
 
 
+#: Rows per round trip when resolving or writing students. The seed is routinely run
+#: against a remote database, where a per-row SELECT/INSERT costs a full network
+#: round trip -- 3,000 of them took half an hour against a managed Postgres in another
+#: region. Everything below therefore works in batches.
+BATCH_SIZE = 1000
+
+
 def seed_from_csv(session: Session, csv_path: Path) -> int:
     """Load the CSV into ``training_records`` and ``students``. Idempotent.
 
@@ -71,29 +78,102 @@ def seed_from_csv(session: Session, csv_path: Path) -> int:
     if missing:
         logger.warning("Seed dataset lacks %d feature column(s): %s", len(missing), missing)
 
-    inserted = 0
+    student_ids = _resolve_students(session, df)
+
+    records = []
     for (_, row), label in zip(df.iterrows(), target, strict=True):
-        student = None
-        if STUDENT_CODE_COLUMN in df.columns and pd.notna(row[STUDENT_CODE_COLUMN]):
-            student = upsert_by_codigo(
-                session,
-                codigo=str(row[STUDENT_CODE_COLUMN]),
-                programa=row.get("programa") if pd.notna(row.get("programa")) else None,
-            )
-        session.add(
-            TrainingRecord(
-                student_id=student.id if student else None,
-                periodo=str(row[PERIOD_COLUMN]) if PERIOD_COLUMN in df.columns else None,
-                features=_features_payload(row, present),
-                deserto=bool(label),
-                source="csv",
-            )
+        codigo = _codigo_of(row) if STUDENT_CODE_COLUMN in df.columns else None
+        records.append(
+            {
+                "student_id": student_ids.get(codigo) if codigo else None,
+                "periodo": str(row[PERIOD_COLUMN]) if PERIOD_COLUMN in df.columns else None,
+                "features": _features_payload(row, present),
+                "deserto": bool(label),
+                "source": "csv",
+            }
         )
-        inserted += 1
+
+    if records:
+        # One executemany rather than 3,000 ORM inserts: SQLAlchemy batches these into a
+        # handful of multi-row INSERTs, so the cost stops scaling with network latency.
+        session.execute(insert(TrainingRecord), records)
 
     session.commit()
-    logger.info("Seeded %d training records from %s", inserted, csv_path.name)
-    return inserted
+    logger.info("Seeded %d training records from %s", len(records), csv_path.name)
+    return len(records)
+
+
+def _codigo_of(row: pd.Series) -> str | None:
+    value = row[STUDENT_CODE_COLUMN]
+    return str(value) if pd.notna(value) else None
+
+
+def _resolve_students(session: Session, df: pd.DataFrame) -> dict[str, int]:
+    """Return ``{codigo: student_id}`` for every student in the frame, creating the new ones.
+
+    Does the whole frame in a fixed number of statements regardless of row count. The
+    per-row equivalent (:func:`students.service.upsert_by_codigo`) is still the right
+    choice for a single prediction; it is not for a bulk load.
+    """
+    if STUDENT_CODE_COLUMN not in df.columns:
+        return {}
+
+    # First programa seen for each code wins, matching the old row-by-row behaviour.
+    wanted: dict[str, str | None] = {}
+    for _, row in df.iterrows():
+        codigo = _codigo_of(row)
+        if codigo is None or codigo in wanted:
+            continue
+        programa = row.get("programa")
+        wanted[codigo] = programa if pd.notna(programa) else None
+
+    if not wanted:
+        return {}
+
+    codes = list(wanted)
+    found: dict[str, tuple[int, str | None]] = {}
+    for chunk in _chunks(codes, BATCH_SIZE):
+        rows = session.execute(
+            select(Student.codigo, Student.id, Student.programa).where(Student.codigo.in_(chunk))
+        ).all()
+        found.update({codigo: (sid, programa) for codigo, sid, programa in rows})
+
+    resolved = {codigo: sid for codigo, (sid, _) in found.items()}
+
+    # Existing rows whose programa the CSV disagrees with, updated in one statement.
+    changes = [
+        {"student_id": found[codigo][0], "new_programa": programa}
+        for codigo, programa in wanted.items()
+        if codigo in found and programa and found[codigo][1] != programa
+    ]
+    if changes:
+        session.execute(
+            update(Student)
+            .where(Student.id == bindparam("student_id"))
+            .values(programa=bindparam("new_programa")),
+            changes,
+        )
+
+    new_rows = [
+        {"codigo": codigo, "programa": programa}
+        for codigo, programa in wanted.items()
+        if codigo not in found
+    ]
+    if new_rows:
+        inserted = session.execute(
+            insert(Student).returning(Student.codigo, Student.id), new_rows
+        ).all()
+        resolved.update(dict(inserted))
+
+    logger.info(
+        "Resolved %d students (%d new, %d existing)", len(resolved), len(new_rows), len(found)
+    )
+    return resolved
+
+
+def _chunks(items: list[str], size: int):
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 def _features_payload(row: pd.Series, columns: list[str]) -> dict[str, Any]:
